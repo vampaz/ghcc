@@ -303,3 +303,59 @@ export const fixtureDraftChangesRequested = makeBaseRawPr({
     ],
   },
 });
+
+// 10. Archived / disabled / locked repos and closed PRs
+export const fixtureArchivedRepo = makeBaseRawPr({
+  id: 'PR_archived_repo',
+  number: 352,
+  title: 'fix: legacy responsive container',
+  url: 'https://github.com/example-org/legacy-dashboard/pull/352',
+  state: 'OPEN',
+  closed: false,
+  mergeable: 'UNKNOWN',
+  mergeStateStatus: 'UNKNOWN',
+  repository: {
+    nameWithOwner: 'example-org/legacy-dashboard',
+    isArchived: true,
+    isDisabled: false,
+    isLocked: false,
+  },
+});
+
+export const fixtureDisabledRepo = makeBaseRawPr({
+  id: 'PR_disabled_repo',
+  number: 353,
+  title: 'chore: disabled repo PR',
+  repository: {
+    nameWithOwner: 'example-org/disabled-repo',
+    isArchived: false,
+    isDisabled: true,
+    isLocked: false,
+  },
+});
+
+export const fixtureLockedRepo = makeBaseRawPr({
+  id: 'PR_locked_repo',
+  number: 354,
+  title: 'chore: locked repo PR',
+  repository: {
+    nameWithOwner: 'example-org/locked-repo',
+    isArchived: false,
+    isDisabled: false,
+    isLocked: true,
+  },
+});
+
+export const fixtureClosedPr = makeBaseRawPr({
+  id: 'PR_closed_pr',
+  number: 355,
+  title: 'fix: already closed pull request',
+  state: 'CLOSED',
+  closed: true,
+  repository: {
+    nameWithOwner: 'acme/web-app',
+    isArchived: false,
+    isDisabled: false,
+    isLocked: false,
+  },
+});

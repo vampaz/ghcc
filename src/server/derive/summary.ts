@@ -18,6 +18,7 @@ export interface SummaryInput {
   autoMerge: boolean;
   mergeQueue: PrMergeQueueInfo | null;
   idleDays: number;
+  viewerLogin?: string;
 }
 
 function formatPendingReviewers(pending: string[]): string {
@@ -100,8 +101,14 @@ export function deriveBlockerSummary(input: SummaryInput): string {
     parts.push('Approved ✓');
   }
 
-  if (input.review.pending.length > 0) {
-    parts.push(`waiting on ${formatPendingReviewers(input.review.pending)}`);
+  const viewerLower = input.viewerLogin?.toLowerCase();
+  const visiblePending =
+    isReviewRequested && viewerLower
+      ? input.review.pending.filter((handle) => handle.toLowerCase() !== viewerLower)
+      : input.review.pending;
+
+  if (visiblePending.length > 0) {
+    parts.push(`waiting on ${formatPendingReviewers(visiblePending)}`);
   } else if (
     input.review.decision === 'required' &&
     !parts.includes('blocked by review') &&

@@ -107,6 +107,23 @@ function computeWholeDays(isoDate: string, nowMs: number): number {
   return Math.max(0, Math.floor((nowMs - ts) / MS_PER_DAY));
 }
 
+export function isActivePullRequest(raw: RawPullRequest): boolean {
+  if (raw.closed === true) {
+    return false;
+  }
+  if (raw.state !== undefined && raw.state !== 'OPEN') {
+    return false;
+  }
+  if (
+    raw.repository.isArchived === true ||
+    raw.repository.isDisabled === true ||
+    raw.repository.isLocked === true
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function mergeRawPullRequests(
   authored: RawPullRequest[],
   reviewRequested: RawPullRequest[],
@@ -114,10 +131,16 @@ export function mergeRawPullRequests(
   const merged = new Map<string, RawPrInput>();
 
   for (const pr of authored) {
+    if (!isActivePullRequest(pr)) {
+      continue;
+    }
     merged.set(pr.id, { raw: pr, sources: ['authored'] });
   }
 
   for (const pr of reviewRequested) {
+    if (!isActivePullRequest(pr)) {
+      continue;
+    }
     const existing = merged.get(pr.id);
     if (existing) {
       if (!existing.sources.includes('review-requested')) {
@@ -260,6 +283,7 @@ export async function normalizePullRequests(
       autoMerge: raw.autoMergeRequest !== null,
       mergeQueue,
       idleDays,
+      viewerLogin: options.viewerLogin,
     });
 
     views.push({

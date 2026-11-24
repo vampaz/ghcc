@@ -39,7 +39,7 @@
       <span class="kpi-main">
         <span class="kpi-value mono-num">{{ waitingCount }}</span>
         <span class="kpi-sub tabular">
-          {{ waitingCount > 0 ? `oldest ${oldestWaitingDays}d` : 'none waiting' }}
+          {{ waitingCount > 0 ? `oldest ${oldestWaitingLabel}` : 'none waiting' }}
         </span>
       </span>
     </button>
@@ -75,13 +75,17 @@
 import { computed } from 'vue';
 import type { BucketFilter } from '@/composables/use-url-state';
 import type { PrView } from '@/types/pr';
+import { formatIdleCompact } from '@/utils/format';
 
 interface Props {
   pullRequests: PrView[];
   activeBucket: BucketFilter;
+  nowMs?: number;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  nowMs: () => Date.now(),
+});
 
 defineEmits<{
   selectBucket: [bucket: BucketFilter];
@@ -116,14 +120,24 @@ const waitingPrs = computed<PrView[]>(() =>
 
 const waitingCount = computed<number>(() => waitingPrs.value.length);
 
-const oldestWaitingDays = computed<number>(() => {
-  let max = 0;
+const oldestWaitingLabel = computed<string>(() => {
+  let oldest: PrView | null = null;
+  let oldestCommitTs = Infinity;
   for (const pr of waitingPrs.value) {
-    if (pr.idleDays > max) {
-      max = pr.idleDays;
+    const ts = Date.parse(pr.lastCommittedAt);
+    const effectiveTs = Number.isFinite(ts) ? ts : props.nowMs - pr.idleDays * 24 * 60 * 60 * 1000;
+    if (!oldest || effectiveTs < oldestCommitTs) {
+      oldest = pr;
+      oldestCommitTs = effectiveTs;
     }
   }
-  return max;
+  if (!oldest) {
+    return '0m';
+  }
+  return formatIdleCompact(oldest.idleDays, oldest.lastCommittedAt, props.nowMs).replace(
+    / idle$/,
+    '',
+  );
 });
 
 const ciStats = computed(() => {

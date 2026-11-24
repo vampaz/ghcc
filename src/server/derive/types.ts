@@ -59,6 +59,8 @@ export interface RawPullRequest {
   number: number;
   title: string;
   url: string;
+  state?: 'OPEN' | 'CLOSED' | 'MERGED';
+  closed?: boolean;
   isDraft: boolean;
   createdAt: string;
   updatedAt: string;
@@ -82,6 +84,9 @@ export interface RawPullRequest {
   } | null;
   repository: {
     nameWithOwner: string;
+    isArchived?: boolean;
+    isDisabled?: boolean;
+    isLocked?: boolean;
   };
   author?: {
     login: string;

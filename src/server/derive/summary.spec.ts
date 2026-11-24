@@ -116,6 +116,43 @@ describe('derive/summary table', () => {
       expectedParts: ['Team review requested', 'blocked by review'],
       forbiddenParts: ['Your review requested'],
     },
+    {
+      label: 'direct review request omits viewer from waiting on list while keeping others',
+      input: makeSummaryInput({
+        sources: ['review-requested'],
+        bucket: 'needs-me',
+        viewerLogin: 'vampaz',
+        review: {
+          decision: 'required',
+          requestKind: 'direct',
+          approvals: [],
+          changesRequested: [],
+          pending: ['ana', 'vampaz'],
+        },
+        merge: { state: 'blocked', source: 'fresh' },
+      }),
+      expectedParts: ['Your review requested', 'waiting on @ana'],
+      forbiddenParts: ['waiting on @vampaz', '@vampaz'],
+    },
+    {
+      label:
+        'direct review request omits waiting on entirely when viewer is the sole pending reviewer',
+      input: makeSummaryInput({
+        sources: ['review-requested'],
+        bucket: 'needs-me',
+        viewerLogin: 'vampaz',
+        review: {
+          decision: 'required',
+          requestKind: 'direct',
+          approvals: [],
+          changesRequested: [],
+          pending: ['Vampaz'],
+        },
+        merge: { state: 'blocked', source: 'fresh' },
+      }),
+      expectedParts: ['Your review requested', 'blocked by review'],
+      forbiddenParts: ['waiting on'],
+    },
   ])('$label', ({ input, expectedParts, forbiddenParts = [] }) => {
     const sentence = deriveBlockerSummary(input);
     for (const part of expectedParts) {

@@ -1,20 +1,26 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { MergeabilityContext } from '@/server/derive/mergeability';
 import {
   computeCounts,
+  isActivePullRequest,
   mergeRawPullRequests,
   normalizePullRequests,
 } from '@/server/derive/normalize';
 import {
   FIXTURE_NOW_MS,
   VIEWER_LOGIN,
+  fixtureArchivedRepo,
   fixtureAutoMerge,
   fixtureBlockedReviewRequired,
+  fixtureClosedPr,
   fixtureConflictingDraft,
   fixtureDirectReviewRequest,
+  fixtureDisabledRepo,
   fixtureDraftChangesRequested,
+  fixtureLockedRepo,
   fixtureMergeQueue,
   fixtureNoCiRollup,
   fixtureNullReviewDecisionTwoApprovals,
@@ -143,6 +149,39 @@ describe('derive/normalize fixtures', () => {
       ready: 2, // noCiPr, nullDecPr
       waiting: 4, // unknownPr, blockedPr, autoPr, mqPr
       draft: 1, // conflictDraft
+    });
+  });
+
+  it('excludes archived, disabled, locked repositories and closed PRs before probing or counting', async () => {
+    expect(isActivePullRequest(fixtureArchivedRepo)).toBe(false);
+    expect(isActivePullRequest(fixtureDisabledRepo)).toBe(false);
+    expect(isActivePullRequest(fixtureLockedRepo)).toBe(false);
+    expect(isActivePullRequest(fixtureClosedPr)).toBe(false);
+    expect(isActivePullRequest(fixtureNoCiRollup)).toBe(true);
+
+    const store = await makeStore();
+    const probeFn = vi.fn<NonNullable<MergeabilityContext['probeFn']>>();
+    const merged = mergeRawPullRequests(
+      [fixtureArchivedRepo, fixtureDisabledRepo, fixtureNoCiRollup],
+      [fixtureLockedRepo, fixtureClosedPr],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.raw.id).toBe(fixtureNoCiRollup.id);
+
+    const { pullRequests } = await normalizePullRequests(merged, {
+      viewerLogin: VIEWER_LOGIN,
+      stateStore: store,
+      probeFn,
+      nowMs: FIXTURE_NOW_MS,
+    });
+
+    expect(probeFn).not.toHaveBeenCalled();
+    expect(pullRequests).toHaveLength(1);
+    expect(computeCounts(pullRequests)).toEqual({
+      needsMe: 0,
+      ready: 1,
+      waiting: 0,
+      draft: 0,
     });
   });
 });

@@ -31,6 +31,7 @@
       <KpiStrip
         :pull-requests="allPullRequests"
         :active-bucket="bucket"
+        :now-ms="nowMs"
         @select-bucket="onSelectBucket"
       />
 

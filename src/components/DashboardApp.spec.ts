@@ -374,4 +374,37 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('displays sub-day oldest waiting age in KPI tile instead of 0d', async () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const snap = makeSnapshot({
+      pullRequests: [
+        makePrView({
+          key: 'acme/worker#305',
+          owner: 'acme',
+          repo: 'worker',
+          repository: 'acme/worker',
+          number: 305,
+          bucket: 'waiting',
+          idleDays: 0,
+          lastCommittedAt: twoHoursAgo,
+        }),
+      ],
+      counts: { needsMe: 0, ready: 0, waiting: 1, draft: 0 },
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(snap), { status: 200 })),
+    );
+
+    const wrapper = mountWithDeps(DashboardApp);
+    await flushPromises();
+
+    const waitingTile = wrapper.findAll('.kpi-tile')[2]!;
+    expect(waitingTile.text()).toContain('oldest 2h');
+    expect(waitingTile.text()).not.toContain('oldest 0d');
+
+    wrapper.unmount();
+  });
 });

@@ -12,6 +12,7 @@ import type { TokenStore } from '@/server/auth';
 import {
   FIXTURE_NOW_MS,
   VIEWER_LOGIN,
+  fixtureArchivedRepo,
   fixtureNoCiRollup,
 } from '@/server/derive/__fixtures__/pull-requests';
 import { createGitHubClient } from '@/server/github-client';
@@ -366,5 +367,44 @@ describe('API routes (mocked fetch)', () => {
     expect(badNumber.status).toBe(400);
 
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('filters archived PRs out of /api/snapshot and queries review-requested with archived:false', async () => {
+    const queries: string[] = [];
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      const q = parsed.query ?? '';
+      queries.push(q);
+      if (q.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureArchivedRepo, fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          search: { nodes: [] },
+        },
+      });
+    });
+
+    await setupRuntime(fetchFn);
+    const res = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SnapshotResponse;
+
+    expect(queries.some((q) => q.includes('archived:false review-requested:@me'))).toBe(true);
+    expect(body.pullRequests.map((p) => p.key)).toEqual(['acme/docs#202']);
+    expect(body.counts.ready).toBe(1);
+    expect(body.counts.waiting).toBe(0);
   });
 });

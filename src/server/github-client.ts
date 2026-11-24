@@ -21,6 +21,8 @@ fragment PrFields on PullRequest {
   number
   title
   url
+  state
+  closed
   isDraft
   createdAt
   updatedAt
@@ -44,6 +46,9 @@ fragment PrFields on PullRequest {
   }
   repository {
     nameWithOwner
+    isArchived
+    isDisabled
+    isLocked
   }
   author {
     login
@@ -135,7 +140,7 @@ ${PR_FIELDS_FRAGMENT}
 
 const REVIEW_QUEUE_QUERY = `
 query ReviewQueue {
-  search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 50) {
+  search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 50) {
     nodes {
       ... on PullRequest {
         ...PrFields
