@@ -1,0 +1,410 @@
+// @vitest-environment node
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { APIContext } from 'astro';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GET as getHealth } from '@/pages/api/health';
+import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
+import { POST as postRefresh } from '@/pages/api/refresh';
+import { GET as getSnapshot } from '@/pages/api/snapshot';
+import type { TokenStore } from '@/server/auth';
+import {
+  FIXTURE_NOW_MS,
+  VIEWER_LOGIN,
+  fixtureArchivedRepo,
+  fixtureNoCiRollup,
+} from '@/server/derive/__fixtures__/pull-requests';
+import { createGitHubClient } from '@/server/github-client';
+import { setRuntimeForTesting } from '@/server/runtime';
+import { createSnapshotService } from '@/server/snapshot-service';
+import { StateStore } from '@/server/state-store';
+import type { SnapshotResponse } from '@/types/pr';
+
+const TEST_SECRET = 'gho_SuperSecretTokenNeverExpose999';
+
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  });
+}
+
+function makeApiContext(
+  request: Request,
+  params: Record<string, string | undefined> = {},
+): APIContext {
+  return {
+    request,
+    params,
+  } as unknown as APIContext;
+}
+
+describe('API routes (mocked fetch)', () => {
+  const dirs: string[] = [];
+
+  async function setupRuntime(fetchFn: typeof fetch, nowFn: () => number = () => FIXTURE_NOW_MS) {
+    const dir = await mkdtemp(join(tmpdir(), 'ghcc-api-'));
+    dirs.push(dir);
+    const stateStore = new StateStore(join(dir, 'state.json'));
+    const tokenStore: TokenStore = {
+      getToken: vi.fn<TokenStore['getToken']>().mockResolvedValue(TEST_SECRET),
+      reloadToken: vi.fn<TokenStore['reloadToken']>().mockResolvedValue(TEST_SECRET),
+      getLogin: vi.fn<TokenStore['getLogin']>().mockResolvedValue(VIEWER_LOGIN),
+      peekToken: vi.fn<TokenStore['peekToken']>().mockReturnValue(TEST_SECRET),
+    };
+    const githubClient = createGitHubClient({ tokenStore, fetchFn, now: nowFn });
+    const snapshotService = createSnapshotService({
+      tokenStore,
+      githubClient,
+      stateStore,
+      now: nowFn,
+    });
+    setRuntimeForTesting({ tokenStore, githubClient, stateStore, snapshotService });
+    return { snapshotService };
+  }
+
+  afterEach(async () => {
+    setRuntimeForTesting(null);
+    while (dirs.length > 0) {
+      const dir = dirs.pop();
+      if (dir) {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('serves /api/health without leaking token', async () => {
+    await setupRuntime(vi.fn<typeof fetch>());
+    const res = await getHealth(makeApiContext(new Request('http://127.0.0.1:4321/api/health')));
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain(TEST_SECRET);
+    expect(JSON.parse(text)).toEqual({
+      gh: 'ok',
+      login: VIEWER_LOGIN,
+      tokenSource: 'gh-cli',
+    });
+  });
+
+  it('returns 304 Not Modified when If-None-Match matches Snapshot ETag', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+            rateLimit: {
+              limit: 5000,
+              cost: 1,
+              remaining: 4999,
+              resetAt: '2026-11-24T13:00:00.000Z',
+            },
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          search: { nodes: [] },
+          rateLimit: { limit: 5000, cost: 1, remaining: 4998, resetAt: '2026-11-24T13:00:00.000Z' },
+        },
+      });
+    });
+
+    await setupRuntime(fetchFn);
+
+    const first = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(first.status).toBe(200);
+    const etag = first.headers.get('etag');
+    expect(etag).toBeTruthy();
+
+    const second = await getSnapshot(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/snapshot', {
+          headers: { 'if-none-match': etag! },
+        }),
+      ),
+    );
+    expect(second.status).toBe(304);
+    expect(await second.text()).toBe('');
+  });
+
+  it('handles HTTP 200 GraphQL partial FORBIDDEN/SSO error and strips secret query params', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        return jsonResponse(
+          {
+            data: {
+              viewer: {
+                login: VIEWER_LOGIN,
+                pullRequests: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [fixtureNoCiRollup],
+                },
+              },
+              rateLimit: {
+                limit: 5000,
+                cost: 1,
+                remaining: 4990,
+                resetAt: '2026-11-24T13:00:00.000Z',
+              },
+            },
+            errors: [
+              {
+                type: 'FORBIDDEN',
+                message: `Resource protected by organization SAML enforcement (${TEST_SECRET})`,
+              },
+            ],
+          },
+          200,
+          {
+            'x-github-sso':
+              'required; url=https://github.com/orgs/acme/sso?authorization_token=secret123',
+          },
+        );
+      }
+      return jsonResponse({
+        data: {
+          search: { nodes: [] },
+          rateLimit: { limit: 5000, cost: 1, remaining: 4989, resetAt: '2026-11-24T13:00:00.000Z' },
+        },
+      });
+    });
+
+    await setupRuntime(fetchFn);
+    const res = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    const text = await res.text();
+    expect(text).not.toContain(TEST_SECRET);
+    expect(text).not.toContain('authorization_token');
+
+    const body = JSON.parse(text) as SnapshotResponse;
+    expect(body.state).toBe('degraded');
+    expect(body.pullRequests).toHaveLength(1);
+    expect(body.warnings[0]?.code).toBe('sso-required');
+    expect(body.warnings[0]?.ssoUrl).toBe('https://github.com/orgs/acme/sso');
+  });
+
+  it('handles partial section failure (review queue fails) and enters degraded with cached authored PRs', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+            rateLimit: {
+              limit: 5000,
+              cost: 1,
+              remaining: 4990,
+              resetAt: '2026-11-24T13:00:00.000Z',
+            },
+          },
+        });
+      }
+      return new Response(`Search backend failure for ${TEST_SECRET}`, { status: 502 });
+    });
+
+    await setupRuntime(fetchFn);
+    const res = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    const text = await res.text();
+    expect(text).not.toContain(TEST_SECRET);
+
+    const body = JSON.parse(text) as SnapshotResponse;
+    expect(body.state).toBe('degraded');
+    expect(body.pullRequests).toHaveLength(1);
+    expect(body.warnings[0]?.code).toBe('review-queue-failed');
+  });
+
+  it('retains cached snapshot when a subsequent fetch hits 403 rate limit', async () => {
+    let nowMs = FIXTURE_NOW_MS;
+    let shouldRateLimit = false;
+    const resetEpoch = Math.floor((nowMs + 180_000) / 1000);
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      if (shouldRateLimit) {
+        return new Response(`API rate limit exceeded (${TEST_SECRET})`, {
+          status: 403,
+          headers: {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-limit': '5000',
+            'x-ratelimit-reset': String(resetEpoch),
+          },
+        });
+      }
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+            rateLimit: {
+              limit: 5000,
+              cost: 1,
+              remaining: 5,
+              resetAt: new Date(resetEpoch * 1000).toISOString(),
+            },
+          },
+        });
+      }
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    await setupRuntime(fetchFn, () => nowMs);
+    const okRes = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect((await okRes.json()).state).toBe('ready');
+
+    shouldRateLimit = true;
+    nowMs += 95_000;
+    const limitedRes = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    const text = await limitedRes.text();
+    expect(text).not.toContain(TEST_SECRET);
+    const body = JSON.parse(text) as SnapshotResponse;
+    expect(body.state).toBe('rate-limited');
+    expect(body.pullRequests).toHaveLength(1);
+    expect(body.warnings[0]?.code).toBe('rate-limited');
+  });
+
+  it('rejects cross-origin POST /api/refresh and allows same-origin POST /api/refresh', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          viewer: {
+            login: VIEWER_LOGIN,
+            pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+          },
+        },
+      }),
+    );
+    await setupRuntime(fetchFn);
+
+    const crossSite = await postRefresh(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/refresh', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+        }),
+      ),
+    );
+    expect(crossSite.status).toBe(403);
+
+    const foreignOrigin = await postRefresh(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/refresh', {
+          method: 'POST',
+          headers: { origin: 'http://evil.example:4321', host: '127.0.0.1:4321' },
+        }),
+      ),
+    );
+    expect(foreignOrigin.status).toBe(403);
+
+    const noHeaders = await postRefresh(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/refresh', { method: 'POST' })),
+    );
+    expect(noHeaders.status).toBe(403);
+
+    const valid = await postRefresh(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/refresh', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+          },
+        }),
+      ),
+    );
+    expect(valid.status).toBe(200);
+  });
+
+  it('rejects invalid owner/repo/number segments on /api/pull without calling fetch', async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    await setupRuntime(fetchFn);
+
+    const badOwner = await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/..%2Fetc/repo/1'), {
+        owner: '../etc',
+        repo: 'repo',
+        number: '1',
+      }),
+    );
+    expect(badOwner.status).toBe(400);
+
+    const badNumber = await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/repo/abc'), {
+        owner: 'acme',
+        repo: 'repo',
+        number: 'abc',
+      }),
+    );
+    expect(badNumber.status).toBe(400);
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('filters archived PRs out of /api/snapshot and queries review-requested with archived:false', async () => {
+    const queries: string[] = [];
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      const q = parsed.query ?? '';
+      queries.push(q);
+      if (q.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureArchivedRepo, fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          search: { nodes: [] },
+        },
+      });
+    });
+
+    await setupRuntime(fetchFn);
+    const res = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SnapshotResponse;
+
+    expect(queries.some((q) => q.includes('archived:false review-requested:@me'))).toBe(true);
+    expect(body.pullRequests.map((p) => p.key)).toEqual(['acme/docs#202']);
+    expect(body.counts.ready).toBe(1);
+    expect(body.counts.waiting).toBe(0);
+  });
+});

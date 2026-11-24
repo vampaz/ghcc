@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "vue", "vitest", "node"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-console": "off"
+  },
+  "ignorePatterns": ["dist/**", ".astro/**", ".cache/**", "coverage/**", "PLAN.md"],
+  "env": {
+    "builtin": true,
+    "browser": true,
+    "node": true
+  }
+}

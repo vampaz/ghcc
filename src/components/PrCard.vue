@@ -1,0 +1,395 @@
+<template>
+  <li
+    class="pr-card"
+    :class="{
+      selected: isSelected,
+      'stale-warm': pr.idleDays > 3 && pr.idleDays <= 7,
+      'stale-hot': pr.idleDays > 7,
+    }"
+    :data-accent="edgeTone"
+  >
+    <div class="pr-card-body">
+      <button
+        type="button"
+        class="pr-card-trigger"
+        :data-pr-key="pr.key"
+        :aria-expanded="isSelected"
+        @click="$emit('select', pr)"
+      >
+        <span class="pr-top-row">
+          <span class="pr-key mono-num">{{ pr.key }}</span>
+          <span class="pr-tags">
+            <span v-if="reviewBadge" class="tag" data-tone="amber">{{ reviewBadge }}</span>
+            <span v-else-if="pr.bucket === 'ready'" class="tag" data-tone="ok">ready</span>
+            <span v-else-if="pr.mergeQueue" class="tag" data-tone="blue">
+              queue #{{ pr.mergeQueue.position }}
+            </span>
+            <span v-else-if="pr.autoMerge" class="tag" data-tone="blue">auto-merge</span>
+            <span v-else-if="pr.isDraft" class="tag" data-tone="muted">draft</span>
+
+            <span
+              v-if="pr.merge.state === 'unknown'"
+              class="tag mono-num"
+              data-tone="muted"
+              title="GitHub computes mergeability lazily; ghcc will re-probe within rate caps."
+            >
+              merge ?
+            </span>
+          </span>
+        </span>
+
+        <span class="pr-title">{{ pr.title }}</span>
+
+        <span class="pr-summary">{{ pr.blockerSummary }}</span>
+
+        <span class="pr-metrics-row">
+          <span class="ci-mini" :title="ciTooltip">
+            <span class="ci-mini-track" aria-hidden="true">
+              <span class="ci-pass" :style="{ width: `${ciWidths.pass}%` }"></span>
+              <span class="ci-pend" :style="{ width: `${ciWidths.pend}%` }"></span>
+              <span class="ci-fail" :style="{ width: `${ciWidths.fail}%` }"></span>
+            </span>
+            <span v-if="pr.ci.hiddenCount > 0" class="ci-cap-note mono-num">
+              +{{ pr.ci.hiddenCount }}
+            </span>
+          </span>
+
+          <span class="diff-stats mono-num">
+            <span class="diff-add">+{{ pr.size.additions }}</span>
+            <span class="diff-del">−{{ pr.size.deletions }}</span>
+            <span class="diff-bar" aria-hidden="true">
+              <span class="diff-bar-add" :style="{ width: `${diffWidths.add}%` }"></span>
+              <span class="diff-bar-del" :style="{ width: `${diffWidths.del}%` }"></span>
+            </span>
+            <span class="diff-files">{{ pr.size.files }}f</span>
+            <span class="idle-age">{{
+              formatIdleCompact(pr.idleDays, pr.lastCommittedAt, nowMs)
+            }}</span>
+          </span>
+        </span>
+      </button>
+
+      <a
+        :href="pr.url"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="external-link"
+        :aria-label="`Open ${pr.key} on GitHub`"
+        title="Open on GitHub (o)"
+      >
+        ↗
+      </a>
+    </div>
+
+    <slot name="inline-inspector" />
+  </li>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue';
+import type { PrView } from '@/types/pr';
+import { formatIdleCompact } from '@/utils/format';
+
+interface Props {
+  pr: PrView;
+  isSelected: boolean;
+  nowMs: number;
+}
+
+const props = defineProps<Props>();
+
+defineEmits<{
+  select: [pr: PrView];
+}>();
+
+const edgeTone = computed<'red' | 'amber' | 'emerald' | 'muted'>(() => {
+  if (props.pr.isDraft && props.pr.bucket === 'draft') {
+    return 'muted';
+  }
+  if (props.pr.ci.state === 'failing' || props.pr.merge.state === 'conflicting') {
+    return 'red';
+  }
+  if (props.pr.bucket === 'ready') {
+    return 'emerald';
+  }
+  if (props.pr.bucket === 'needs-me') {
+    return 'amber';
+  }
+  return 'muted';
+});
+
+const reviewBadge = computed<string | null>(() => {
+  if (!props.pr.sources.includes('review-requested')) {
+    return null;
+  }
+  return props.pr.review.requestKind === 'team' ? 'team review' : 'review';
+});
+
+const ciWidths = computed(() => {
+  const { passing, failing, pending, state } = props.pr.ci;
+  const total = passing + failing.length + pending;
+  if (total === 0) {
+    if (state === 'failing') {
+      return { pass: 0, pend: 0, fail: 100 };
+    }
+    if (state === 'pending') {
+      return { pass: 0, pend: 100, fail: 0 };
+    }
+    return { pass: 0, pend: 0, fail: 0 };
+  }
+  const pass = Math.round((passing / total) * 100);
+  const fail = Math.round((failing.length / total) * 100);
+  const pend = Math.max(0, 100 - pass - fail);
+  return { pass, pend, fail };
+});
+
+const ciTooltip = computed<string>(() => {
+  const { passing, failing, pending, hiddenCount, state } = props.pr.ci;
+  if (state === 'none') {
+    return 'No CI checks';
+  }
+  const shown = passing + failing.length + pending;
+  const total = shown + hiddenCount;
+  const base = `${passing} passing, ${failing.length} failing, ${pending} pending`;
+  return hiddenCount > 0 ? `${base} (showing ${shown} of ${total} checks)` : base;
+});
+
+const diffWidths = computed(() => {
+  const total = props.pr.size.additions + props.pr.size.deletions;
+  if (total === 0) {
+    return { add: 50, del: 50 };
+  }
+  const add = Math.round((props.pr.size.additions / total) * 100);
+  return { add, del: 100 - add };
+});
+</script>
+
+<style scoped>
+.pr-card {
+  position: relative;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-subtle);
+  border-left-width: 4px;
+  background-color: var(--bg-surface);
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.pr-card[data-accent='red'] {
+  border-left-color: var(--accent-red);
+}
+
+.pr-card[data-accent='amber'] {
+  border-left-color: var(--accent-amber);
+}
+
+.pr-card[data-accent='emerald'] {
+  border-left-color: var(--accent-emerald);
+}
+
+.pr-card[data-accent='muted'] {
+  border-left-color: var(--border-strong);
+}
+
+.pr-card.stale-warm {
+  background-color: var(--bg-stale-warm);
+}
+
+.pr-card.stale-hot {
+  background-color: var(--bg-stale-hot);
+}
+
+.pr-card.selected {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 1px var(--accent-blue);
+}
+
+.pr-card-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.375rem;
+}
+
+.pr-card-trigger {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+  padding: 0.75rem 0.5rem 0.75rem 0.875rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0.375rem;
+}
+
+.pr-card-trigger:hover {
+  background-color: var(--bg-surface-hover);
+}
+
+.pr-top-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.5rem;
+}
+
+.pr-key {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.pr-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.tag {
+  padding: 0.08rem 0.42rem;
+  border-radius: 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-secondary);
+}
+
+.tag[data-tone='amber'] {
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+  border-color: var(--accent-amber);
+}
+
+.tag[data-tone='ok'] {
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+  border-color: var(--accent-emerald);
+}
+
+.tag[data-tone='blue'] {
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+.pr-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+.pr-summary {
+  font-size: 0.8125rem;
+  color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.pr-metrics-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.15rem;
+}
+
+.ci-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.ci-mini-track {
+  display: flex;
+  width: 4.5rem;
+  height: 0.375rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background-color: var(--bg-surface-muted);
+}
+
+.ci-pass {
+  background-color: var(--accent-emerald);
+}
+
+.ci-pend {
+  background-color: var(--accent-blue);
+}
+
+.ci-fail {
+  background-color: var(--accent-red);
+}
+
+.ci-cap-note {
+  font-size: 0.7rem;
+  color: var(--ink-muted);
+}
+
+.diff-stats {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+}
+
+.diff-add {
+  color: var(--accent-emerald);
+}
+
+.diff-del {
+  color: var(--accent-red);
+}
+
+.diff-bar {
+  display: inline-flex;
+  width: 2.25rem;
+  height: 0.32rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background-color: var(--bg-surface-muted);
+}
+
+.diff-bar-add {
+  background-color: var(--accent-emerald);
+}
+
+.diff-bar-del {
+  background-color: var(--accent-red);
+}
+
+.diff-files,
+.idle-age {
+  color: var(--ink-muted);
+}
+
+.external-link {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  min-height: 2rem;
+  margin: 0.625rem 0.625rem 0 0;
+  border-radius: 0.375rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-secondary);
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.external-link:hover {
+  color: var(--ink-primary);
+  border-color: var(--border-strong);
+}
+</style>
