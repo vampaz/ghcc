@@ -1,0 +1,119 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: light dark;
+
+  &:has(> head > meta[name='color-scheme'][content='dark']) {
+    color-scheme: dark;
+  }
+
+  &:has(> head > meta[name='color-scheme'][content='light']) {
+    color-scheme: light;
+  }
+
+  --bg-canvas: light-dark(#f4f6f9, #0b1017);
+  --bg-surface: light-dark(#ffffff, #121923);
+  --bg-surface-muted: light-dark(#eef2f6, #182230);
+  --bg-surface-hover: light-dark(#f8fafc, #1c2838);
+  --bg-stale-warm: light-dark(#fffbeb, #241b0b);
+  --bg-stale-hot: light-dark(#fef3c7, #2d200a);
+
+  --ink-primary: light-dark(#0f172a, #e6edf3);
+  --ink-secondary: light-dark(#475569, #9ba8b8);
+  --ink-muted: light-dark(#64748b, #7b8898);
+
+  --border-subtle: light-dark(#dce3ec, #233041);
+  --border-strong: light-dark(#cbd5e1, #324359);
+
+  --accent-red: light-dark(#dc2626, #f87171);
+  --accent-red-bg: light-dark(#fef2f2, #2b1417);
+  --accent-amber: light-dark(#b45309, #fbbf24);
+  --accent-amber-bg: light-dark(#fffbeb, #291f0b);
+  --accent-emerald: light-dark(#047857, #34d399);
+  --accent-emerald-bg: light-dark(#ecfdf5, #0b261d);
+  --accent-blue: light-dark(#1d4ed8, #60a5fa);
+  --accent-blue-bg: light-dark(#eff6ff, #11223a);
+
+  --focus-ring: light-dark(#1d4ed8, #60a5fa);
+  --backdrop-bg: light-dark(rgb(15 23 42 / 0.45), rgb(2 6 14 / 0.72));
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+:where(a:any-link, button, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+.skip-link:focus {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  padding: 0.5rem 0.875rem;
+  border-radius: 0.375rem;
+  background: var(--bg-surface);
+  color: var(--ink-primary);
+  border: 1px solid var(--border-strong);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+dialog.inspector-dialog {
+  display: none;
+}
+
+dialog.inspector-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background-color: var(--backdrop-bg);
+  backdrop-filter: blur(2px);
+}
