@@ -6,6 +6,13 @@ import { defineConfig } from 'astro/config';
 import { verifyBootAuth } from './src/server/boot-check.mjs';
 
 const port = Number(process.env.PORT ?? 4321);
+const host = process.env.HOST || '127.0.0.1';
+
+const extraAllowedDomains = (process.env.GHCC_ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((entry) => entry.trim().toLowerCase())
+  .filter(Boolean)
+  .map((hostname) => ({ hostname }));
 
 function ghccBootCheckIntegration() {
   return {
@@ -17,7 +24,8 @@ function ghccBootCheckIntegration() {
         }
         try {
           const result = await verifyBootAuth();
-          logger.info(`Authenticated with gh CLI as ${result.login}`);
+          const sourceLabel = result.tokenSource === 'env' ? 'configured token' : 'gh CLI';
+          logger.info(`Authenticated with ${sourceLabel} as ${result.login}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           logger.error(message);
@@ -32,8 +40,16 @@ export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
   integrations: [vue(), ghccBootCheckIntegration()],
+  security: {
+    allowedDomains: [
+      { hostname: '127.0.0.1' },
+      { hostname: 'localhost' },
+      { hostname: 'cloud.local' },
+      ...extraAllowedDomains,
+    ],
+  },
   server: {
-    host: '127.0.0.1',
+    host,
     port: Number.isFinite(port) && port > 0 ? port : 4321,
   },
   vite: {

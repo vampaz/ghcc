@@ -43,6 +43,7 @@ describe('snapshot-service & state machine', () => {
         .fn<TokenStore['reloadToken']>()
         .mockResolvedValue('gho_reloadedToken1234567890'),
       getLogin: vi.fn<TokenStore['getLogin']>().mockResolvedValue(VIEWER_LOGIN),
+      getTokenSource: vi.fn<TokenStore['getTokenSource']>().mockReturnValue('gh-cli'),
       peekToken: vi.fn<TokenStore['peekToken']>().mockReturnValue('gho_fakeToken1234567890'),
     };
   }

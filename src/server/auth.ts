@@ -1,9 +1,10 @@
 import {
   BootAuthError,
-  readGhToken,
+  readGhCredential,
   verifyBootAuth,
   type BootOptions,
   type ExecFileFn,
+  type TokenSource,
 } from './boot-check.mjs';
 
 export { BootAuthError };
@@ -12,12 +13,14 @@ export interface TokenStore {
   getToken(): Promise<string>;
   reloadToken(): Promise<string>;
   getLogin(): Promise<string>;
+  getTokenSource(): TokenSource;
   peekToken(): string | null;
 }
 
 export function createTokenStore(options: BootOptions = {}): TokenStore {
   let cachedToken: string | null = null;
   let cachedLogin: string | null = null;
+  let cachedTokenSource: TokenSource = 'gh-cli';
   let inFlightLoad: Promise<string> | null = null;
 
   async function load(forceVerify: boolean): Promise<string> {
@@ -30,11 +33,17 @@ export function createTokenStore(options: BootOptions = {}): TokenStore {
         const result = await verifyBootAuth(options);
         cachedToken = result.token;
         cachedLogin = result.login;
+        cachedTokenSource = result.tokenSource;
         return result.token;
       }
-      const token = await readGhToken({ execFileFn: options.execFileFn });
-      cachedToken = token;
-      return token;
+      const credential = await readGhCredential({
+        execFileFn: options.execFileFn,
+        env: options.env,
+        readFileFn: options.readFileFn,
+      });
+      cachedToken = credential.token;
+      cachedTokenSource = credential.tokenSource;
+      return credential.token;
     })();
 
     try {
@@ -68,10 +77,14 @@ export function createTokenStore(options: BootOptions = {}): TokenStore {
       return cachedLogin;
     },
 
+    getTokenSource(): TokenSource {
+      return cachedTokenSource;
+    },
+
     peekToken(): string | null {
       return cachedToken;
     },
   };
 }
 
-export type { BootOptions, ExecFileFn };
+export type { BootOptions, ExecFileFn, TokenSource };

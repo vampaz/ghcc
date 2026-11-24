@@ -189,5 +189,5 @@ export interface PrDetailResponse {
 export interface HealthResponse {
   gh: 'ok' | 'error';
   login: string;
-  tokenSource: 'gh-cli';
+  tokenSource: 'gh-cli' | 'env';
 }

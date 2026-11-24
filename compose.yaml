@@ -1,0 +1,21 @@
+services:
+  ghcc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ghcc
+    restart: unless-stopped
+    ports:
+      - '${GHCC_BIND_HOST:-0.0.0.0}:${PORT:-4321}:4321'
+    environment:
+      HOST: '0.0.0.0'
+      PORT: '4321'
+      GH_TOKEN: '${GH_TOKEN:-}'
+      GITHUB_TOKEN: '${GITHUB_TOKEN:-}'
+      GH_TOKEN_FILE: '${GH_TOKEN_FILE:-}'
+      GHCC_ALLOWED_HOSTS: '${GHCC_ALLOWED_HOSTS:-cloud.local}'
+    volumes:
+      - ghcc-cache:/app/.cache
+
+volumes:
+  ghcc-cache:

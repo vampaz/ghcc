@@ -1,0 +1,11 @@
+.git
+.astro
+.cache
+.env
+.env.*
+coverage
+dist
+node_modules
+PLAN.md
+*.log
+.DS_Store

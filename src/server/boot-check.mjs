@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -20,7 +21,36 @@ function redact(input, secret) {
   return out;
 }
 
-export async function readGhToken(options = {}) {
+export async function readGhCredential(options = {}) {
+  const env = options.env ?? process.env;
+  const tokenFile = typeof env.GH_TOKEN_FILE === 'string' ? env.GH_TOKEN_FILE.trim() : '';
+
+  if (tokenFile) {
+    let fileToken = '';
+    try {
+      const readFileFn = options.readFileFn ?? readFile;
+      fileToken = String(await readFileFn(tokenFile, 'utf8')).trim();
+    } catch (error) {
+      throw new BootAuthError(
+        `Failed to read GitHub token from GH_TOKEN_FILE (${redact(error instanceof Error ? error.message : error)}).`,
+      );
+    }
+
+    if (!fileToken) {
+      throw new BootAuthError('GH_TOKEN_FILE is empty. Provide a valid GitHub token.');
+    }
+
+    return { token: fileToken, tokenSource: 'env' };
+  }
+
+  const envToken =
+    (typeof env.GH_TOKEN === 'string' ? env.GH_TOKEN.trim() : '') ||
+    (typeof env.GITHUB_TOKEN === 'string' ? env.GITHUB_TOKEN.trim() : '');
+
+  if (envToken) {
+    return { token: envToken, tokenSource: 'env' };
+  }
+
   const run = options.execFileFn ?? execFileAsync;
 
   try {
@@ -28,7 +58,9 @@ export async function readGhToken(options = {}) {
   } catch (error) {
     const detail = error instanceof Error ? redact(error.message) : '';
     const suffix = detail ? ` (${detail.split('\n')[0]})` : '';
-    throw new BootAuthError(`GitHub CLI is not logged in${suffix}. run: gh auth login`);
+    throw new BootAuthError(
+      `GitHub CLI is not logged in${suffix}. run: gh auth login (or set GH_TOKEN)`,
+    );
   }
 
   let token = '';
@@ -45,12 +77,21 @@ export async function readGhToken(options = {}) {
     throw new BootAuthError('gh auth token returned an empty credential. run: gh auth login');
   }
 
-  return token;
+  return { token, tokenSource: 'gh-cli' };
+}
+
+export async function readGhToken(options = {}) {
+  const credential = await readGhCredential(options);
+  return credential.token;
 }
 
 export async function verifyBootAuth(options = {}) {
   const fetchFn = options.fetchFn ?? fetch;
-  const token = await readGhToken(options);
+  const { token, tokenSource } = await readGhCredential(options);
+  const remediation =
+    tokenSource === 'env'
+      ? 'Check GH_TOKEN, GITHUB_TOKEN, or GH_TOKEN_FILE.'
+      : 'run: gh auth login';
 
   let response;
   try {
@@ -71,14 +112,19 @@ export async function verifyBootAuth(options = {}) {
   }
 
   if (response.status === 401) {
+    const sourceLabel = tokenSource === 'env' ? 'configured token' : 'gh CLI token';
     throw new BootAuthError(
-      'GitHub rejected the gh CLI token (401 Unauthorized). run: gh auth login',
+      `GitHub rejected the ${sourceLabel} (401 Unauthorized). ${remediation}`,
     );
   }
 
   if (!response.ok) {
+    const checkHint =
+      tokenSource === 'env'
+        ? 'Check GH_TOKEN, GITHUB_TOKEN, or GH_TOKEN_FILE.'
+        : 'Check gh auth status.';
     throw new BootAuthError(
-      `GitHub token verification failed with HTTP ${response.status}. Check gh auth status.`,
+      `GitHub token verification failed with HTTP ${response.status}. ${checkHint}`,
     );
   }
 
@@ -88,8 +134,8 @@ export async function verifyBootAuth(options = {}) {
     const errMsg = payload?.errors?.[0]?.message
       ? redact(payload.errors[0].message, token)
       : 'missing viewer.login';
-    throw new BootAuthError(`GitHub token verification failed (${errMsg}). run: gh auth login`);
+    throw new BootAuthError(`GitHub token verification failed (${errMsg}). ${remediation}`);
   }
 
-  return { token, login };
+  return { token, login, tokenSource };
 }

@@ -6,7 +6,7 @@ import type { APIContext } from 'astro';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getHealth } from '@/pages/api/health';
 import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
-import { POST as postRefresh } from '@/pages/api/refresh';
+import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
 import { GET as getSnapshot } from '@/pages/api/snapshot';
 import type { TokenStore } from '@/server/auth';
 import {
@@ -51,6 +51,7 @@ describe('API routes (mocked fetch)', () => {
       getToken: vi.fn<TokenStore['getToken']>().mockResolvedValue(TEST_SECRET),
       reloadToken: vi.fn<TokenStore['reloadToken']>().mockResolvedValue(TEST_SECRET),
       getLogin: vi.fn<TokenStore['getLogin']>().mockResolvedValue(VIEWER_LOGIN),
+      getTokenSource: vi.fn<TokenStore['getTokenSource']>().mockReturnValue('gh-cli'),
       peekToken: vi.fn<TokenStore['peekToken']>().mockReturnValue(TEST_SECRET),
     };
     const githubClient = createGitHubClient({ tokenStore, fetchFn, now: nowFn });
@@ -342,6 +343,52 @@ describe('API routes (mocked fetch)', () => {
       ),
     );
     expect(valid.status).toBe(200);
+  });
+
+  it('allows configured GHCC_ALLOWED_HOSTS (such as cloud.local) for same-origin POST /api/refresh', () => {
+    const cloudDirect = new Request('http://cloud.local:4321/api/refresh', {
+      method: 'POST',
+      headers: {
+        'sec-fetch-site': 'same-origin',
+        origin: 'http://cloud.local:4321',
+        host: 'cloud.local:4321',
+      },
+    });
+    expect(isAllowedSameOriginPost(cloudDirect, {})).toBe(false);
+    expect(isAllowedSameOriginPost(cloudDirect, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(true);
+
+    const cloudProxiedHttps = new Request('http://127.0.0.1:4321/api/refresh', {
+      method: 'POST',
+      headers: {
+        'sec-fetch-site': 'same-origin',
+        origin: 'https://cloud.local',
+        host: 'ghcc:4321',
+        'x-forwarded-host': 'cloud.local:443',
+      },
+    });
+    expect(isAllowedSameOriginPost(cloudProxiedHttps, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(
+      true,
+    );
+
+    const wrongPort = new Request('http://cloud.local:4321/api/refresh', {
+      method: 'POST',
+      headers: {
+        'sec-fetch-site': 'same-origin',
+        origin: 'http://cloud.local:9999',
+        host: 'cloud.local:4321',
+      },
+    });
+    expect(isAllowedSameOriginPost(wrongPort, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(false);
+
+    const evilHost = new Request('http://evil.example:4321/api/refresh', {
+      method: 'POST',
+      headers: {
+        'sec-fetch-site': 'same-origin',
+        origin: 'http://evil.example:4321',
+        host: 'evil.example:4321',
+      },
+    });
+    expect(isAllowedSameOriginPost(evilHost, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(false);
   });
 
   it('rejects invalid owner/repo/number segments on /api/pull without calling fetch', async () => {

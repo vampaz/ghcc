@@ -33,7 +33,26 @@ npm run build
 npm run start
 ```
 
-The server binds exclusively to `127.0.0.1` and fails closed at boot if `gh` is unauthenticated or its token is rejected.
+The bare-metal server defaults to `127.0.0.1` and fails closed at boot if credentials are missing or rejected by GitHub.
+
+## Docker (Mac or `cloud.local`)
+
+Build and start the container using your existing `gh` CLI token (kept in container memory, not written to disk):
+
+```sh
+GH_TOKEN="$(gh auth token)" docker compose up -d --build
+```
+
+- On this Mac (OrbStack), open [http://127.0.0.1:4321](http://127.0.0.1:4321) or [http://localhost:4321](http://localhost:4321). To restrict host port publishing to loopback only, pass `GHCC_BIND_HOST=127.0.0.1`.
+- On `cloud.local` (Ubuntu server), open `http://cloud.local:4321` (or put a reverse proxy in front of port `4321`). `compose.yaml` allows `cloud.local` for same-origin `POST /api/refresh` via `GHCC_ALLOWED_HOSTS`.
+- For long-running restarts on `cloud.local`, store `GH_TOKEN=<token>` in an untracked `chmod 600 .env` file next to `compose.yaml`, or mount a read-only secret file and set `GH_TOKEN_FILE`.
+- Persistent mergeability cache is stored in the `ghcc-cache` Docker volume (`/app/.cache`).
+
+Stop the container:
+
+```sh
+docker compose down
+```
 
 ## Keyboard Shortcuts
 

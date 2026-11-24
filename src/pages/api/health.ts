@@ -11,7 +11,7 @@ export const GET: APIRoute = async () => {
       JSON.stringify({
         gh: 'ok',
         login,
-        tokenSource: 'gh-cli',
+        tokenSource: tokenStore.getTokenSource(),
       }),
       {
         status: 200,
