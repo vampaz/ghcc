@@ -1,39 +1,44 @@
 <template>
-  <dialog
+  <aside
     v-if="mode === 'dialog'"
-    ref="dialogRef"
     class="inspector-dialog"
-    closedby="any"
+    :class="{ open: isOpen }"
+    :inert="!isOpen"
     aria-labelledby="inspector-title"
-    @close="onNativeClose"
   >
     <div class="drawer-header">
       <div class="drawer-title-group">
-        <span v-if="pr" class="drawer-key mono-num">{{ pr.key }}</span>
-        <h1 id="inspector-title" class="drawer-title">
-          {{ pr?.title ?? 'Pull Request Inspector' }}
-        </h1>
+        <span v-if="activePr" class="drawer-key mono-num">{{ activePr.key }}</span>
+        <h2 id="inspector-title" class="drawer-title">
+          {{ activePr?.title ?? 'Pull Request Inspector' }}
+        </h2>
       </div>
 
       <div class="drawer-actions">
-        <a v-if="pr" :href="pr.url" target="_blank" rel="noopener noreferrer" class="drawer-btn">
+        <a
+          v-if="activePr"
+          :href="activePr.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="drawer-btn"
+        >
           GitHub ↗
         </a>
-        <button type="button" class="drawer-btn" autofocus @click="$emit('close')">Close</button>
+        <button type="button" class="drawer-btn" @click="$emit('close')">Close</button>
       </div>
     </div>
 
-    <div class="drawer-scroll">
+    <div class="drawer-scroll app-scroll">
       <PrInspectorBody
-        :pr="pr"
-        :inspector="inspector"
+        :pr="activePr"
+        :inspector="activeInspector"
         :now-ms="nowMs"
         :sync-state="syncState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
       />
     </div>
-  </dialog>
+  </aside>
 
   <section
     v-else-if="inspector.status !== 'closed' && pr"
@@ -56,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import PrInspectorBody from '@/components/PrInspectorBody.vue';
 import {
   IDLE_PR_SYNC_STATE,
@@ -77,124 +82,90 @@ const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
 });
 
-const emit = defineEmits<{
+defineEmits<{
   close: [];
   retry: [pr: PrView];
   sync: [pr: PrView];
 }>();
 
-const dialogRef = ref<HTMLDialogElement | null>(null);
-
-function syncDialogOpen(): void {
-  if (props.mode !== 'dialog') {
-    return;
-  }
-  const el = dialogRef.value;
-  if (!el) {
-    return;
-  }
-  const shouldOpen = props.inspector.status !== 'closed';
-  if (shouldOpen && !el.open) {
-    if (typeof el.showModal === 'function') {
-      el.showModal();
-    } else {
-      el.setAttribute('open', '');
-    }
-  } else if (!shouldOpen && el.open) {
-    if (typeof el.close === 'function') {
-      el.close();
-    } else {
-      el.removeAttribute('open');
-    }
-  }
-}
-
-function onNativeClose(): void {
-  if (props.inspector.status !== 'closed') {
-    emit('close');
-  }
-}
-
-let cleanupLightDismiss: (() => void) | null = null;
-
-function installClosedByFallback(el: HTMLDialogElement): void {
-  if (cleanupLightDismiss) {
-    cleanupLightDismiss();
-    cleanupLightDismiss = null;
-  }
-  if (typeof HTMLDialogElement === 'undefined' || 'closedBy' in HTMLDialogElement.prototype) {
-    return;
-  }
-
-  let pressedOutside = false;
-
-  function isOutside(event: PointerEvent): boolean {
-    const r = el.getBoundingClientRect();
-    return (
-      event.clientX < r.left ||
-      event.clientX > r.right ||
-      event.clientY < r.top ||
-      event.clientY > r.bottom
-    );
-  }
-
-  function onPointerDown(event: PointerEvent): void {
-    pressedOutside = isOutside(event);
-  }
-
-  function onPointerUp(event: PointerEvent): void {
-    if (pressedOutside && isOutside(event) && el.open) {
-      el.close();
-    }
-  }
-
-  el.addEventListener('pointerdown', onPointerDown);
-  el.addEventListener('pointerup', onPointerUp);
-  cleanupLightDismiss = () => {
-    el.removeEventListener('pointerdown', onPointerDown);
-    el.removeEventListener('pointerup', onPointerUp);
-  };
-}
+const lastOpenPr = ref<PrView | null>(props.pr);
+const lastOpenInspector = ref<InspectorState>(props.inspector);
 
 watch(
-  () => [props.mode, props.inspector.status, dialogRef.value] as const,
-  () => {
-    syncDialogOpen();
-    if (dialogRef.value && props.mode === 'dialog') {
-      installClosedByFallback(dialogRef.value);
+  () => [props.pr, props.inspector] as const,
+  ([nextPr, nextInspector]) => {
+    if (nextInspector.status !== 'closed') {
+      lastOpenInspector.value = nextInspector;
+      if (nextPr) {
+        lastOpenPr.value = nextPr;
+      }
     }
   },
-  { flush: 'post' },
+  { immediate: true },
 );
 
-onMounted(() => {
-  syncDialogOpen();
-  if (dialogRef.value && props.mode === 'dialog') {
-    installClosedByFallback(dialogRef.value);
-  }
-});
-
-onUnmounted(() => {
-  if (cleanupLightDismiss) {
-    cleanupLightDismiss();
-    cleanupLightDismiss = null;
-  }
-});
+const isOpen = computed<boolean>(() => props.inspector.status !== 'closed');
+const activePr = computed<PrView | null>(() => props.pr ?? lastOpenPr.value);
+const activeInspector = computed<InspectorState>(() =>
+  props.inspector.status !== 'closed' ? props.inspector : lastOpenInspector.value,
+);
 </script>
 
 <style scoped>
 .inspector-dialog {
-  margin: 0 0 0 auto;
-  padding: 0;
-  width: min(36rem, 100vw);
-  max-width: 100vw;
-  height: 100dvh;
-  max-height: 100dvh;
-  border: 0;
+  position: fixed;
+  inset-block: 0;
+  inset-inline-end: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  inline-size: min(32rem, 100%);
+  max-inline-size: 100%;
+  block-size: 100dvh;
   border-left: 1px solid var(--border-strong);
   background-color: var(--bg-surface);
   color: var(--ink-primary);
-  box-shadow: -8px 0 32px rgb(0 0 0 / 0.25);
+  box-shadow: -8px 0 28px rgb(0 0 0 / 0.24);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    translate 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 160ms;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .inspector-dialog {
+    translate: 100% 0;
+  }
+}
+
+.inspector-dialog.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    translate 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 0s;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .inspector-dialog.open {
+    translate: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inspector-dialog,
+  .inspector-dialog.open {
+    transition-duration: 80ms, 80ms, 0s;
+  }
+
+  .inspector-dialog {
+    transition-delay: 0s, 0s, 80ms;
+  }
 }
 
 .drawer-header {

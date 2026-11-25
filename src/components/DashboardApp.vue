@@ -42,13 +42,13 @@
           :view="view"
           :bucket="bucket"
           :q="q"
-          :repo="repo"
+          :repo-selection="repoSelection"
           :drafts="drafts"
           :draft-count="draftPullRequests.length"
           @update:view="view = $event"
           @update:bucket="bucket = $event"
           @update:q="q = $event"
-          @update:repo="repo = $event"
+          @clear-repos="repoSelection = ALL_REPOS_SELECTION"
           @update:drafts="drafts = $event"
           @clear="resetFilters"
         />
@@ -108,9 +108,10 @@
 
           <RepoBreakdown
             :pull-requests="ownershipFilteredPulls"
-            :active-repo="repo"
+            :repo-selection="repoSelection"
             :include-drafts="drafts"
-            @select-repo="repo = $event"
+            @toggle-repo="onToggleRepo"
+            @toggle-all="onToggleAllRepos"
           />
         </aside>
       </div>
@@ -162,7 +163,13 @@ import WaitingPanel from '@/components/WaitingPanel.vue';
 import WarningStrip from '@/components/WarningStrip.vue';
 import { useDashboardState } from '@/composables/use-dashboard-state';
 import { useTheme } from '@/composables/use-theme';
-import { type BucketFilter, useUrlState } from '@/composables/use-url-state';
+import {
+  ALL_REPOS_SELECTION,
+  type BucketFilter,
+  toggleAllReposSelection,
+  toggleRepoInSelection,
+  useUrlState,
+} from '@/composables/use-url-state';
 import type { PrView } from '@/types/pr';
 
 const {
@@ -184,7 +191,7 @@ const {
 } = useDashboardState();
 
 const { resolvedTheme, toggleTheme } = useTheme();
-const { view, bucket, q, repo, drafts, resetFilters } = useUrlState();
+const { view, bucket, q, repoSelection, drafts, resetFilters } = useUrlState();
 
 const filterBarRef = ref<InstanceType<typeof FilterBar> | null>(null);
 const cursorKey = ref<string | null>(null);
@@ -210,7 +217,10 @@ function isTeamOnlyPr(pr: PrView): boolean {
 }
 
 function matchesSearchAndRepo(pr: PrView): boolean {
-  if (repo.value && pr.repository !== repo.value) {
+  if (repoSelection.value.mode === 'none') {
+    return false;
+  }
+  if (repoSelection.value.mode === 'subset' && !repoSelection.value.repos.includes(pr.repository)) {
     return false;
   }
   const query = q.value.trim().toLowerCase();
@@ -224,6 +234,14 @@ function matchesSearchAndRepo(pr: PrView): boolean {
     pr.headRefName.toLowerCase().includes(query) ||
     pr.author.toLowerCase().includes(query)
   );
+}
+
+function onToggleRepo(repoName: string, allRepos: string[]): void {
+  repoSelection.value = toggleRepoInSelection(repoSelection.value, repoName, allRepos);
+}
+
+function onToggleAllRepos(allRepos: string[]): void {
+  repoSelection.value = toggleAllReposSelection(repoSelection.value, allRepos);
 }
 
 const ownershipFilteredPulls = computed<PrView[]>(() =>
@@ -276,7 +294,7 @@ const hasActiveFilters = computed<boolean>(() => {
     view.value !== 'all' ||
     bucket.value !== '' ||
     q.value.trim() !== '' ||
-    repo.value !== '' ||
+    repoSelection.value.mode !== 'all' ||
     drafts.value
   );
 });

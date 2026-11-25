@@ -44,13 +44,14 @@
     </div>
 
     <button
-      v-if="repo"
+      v-if="repoChipLabel"
       type="button"
       class="filter-chip repo-chip"
-      :aria-label="`Clear repository filter ${repo}`"
-      @click="$emit('update:repo', '')"
+      :title="repoChipTitle"
+      :aria-label="`Clear repository filter (${repoChipLabel})`"
+      @click="$emit('clearRepos')"
     >
-      <span>{{ compactRepo(repo) }}</span>
+      <span>{{ repoChipLabel }}</span>
       <span aria-hidden="true">×</span>
     </button>
 
@@ -73,13 +74,13 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import type { BucketFilter, ViewFilter } from '@/composables/use-url-state';
+import type { BucketFilter, RepoSelection, ViewFilter } from '@/composables/use-url-state';
 
 interface Props {
   view: ViewFilter;
   bucket: BucketFilter;
   q: string;
-  repo: string;
+  repoSelection: RepoSelection;
   drafts: boolean;
   draftCount: number;
 }
@@ -90,7 +91,7 @@ const emit = defineEmits<{
   'update:view': [value: ViewFilter];
   'update:bucket': [value: BucketFilter];
   'update:q': [value: string];
-  'update:repo': [value: string];
+  clearRepos: [];
   'update:drafts': [value: boolean];
   clear: [];
 }>();
@@ -122,12 +123,32 @@ const bucketLabel = computed<string>(() => {
   }
 });
 
+const repoChipLabel = computed<string>(() => {
+  if (props.repoSelection.mode === 'all') {
+    return '';
+  }
+  if (props.repoSelection.mode === 'none') {
+    return 'No repos';
+  }
+  if (props.repoSelection.repos.length === 1) {
+    return compactRepo(props.repoSelection.repos[0]!);
+  }
+  return `${props.repoSelection.repos.length} repos`;
+});
+
+const repoChipTitle = computed<string | undefined>(() => {
+  if (props.repoSelection.mode === 'subset') {
+    return props.repoSelection.repos.join(', ');
+  }
+  return undefined;
+});
+
 const hasActiveFilters = computed<boolean>(() => {
   return (
     props.view !== 'all' ||
     props.bucket !== '' ||
     props.q.trim() !== '' ||
-    props.repo !== '' ||
+    props.repoSelection.mode !== 'all' ||
     props.drafts
   );
 });

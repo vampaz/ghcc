@@ -2,6 +2,14 @@ import { flushPromises } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DashboardApp from '@/components/DashboardApp.vue';
 import { IDLE_PR_SYNC_STATE, transitionPrSyncState } from '@/composables/use-dashboard-state';
+import {
+  ALL_REPOS_SELECTION,
+  NO_REPOS_SELECTION,
+  parseFiltersFromSearch,
+  serializeFiltersToSearch,
+  toggleAllReposSelection,
+  toggleRepoInSelection,
+} from '@/composables/use-url-state';
 import { mountWithDeps } from '@/test/mount-with-deps';
 import type { PrDetailResponse, PrView, SnapshotResponse } from '@/types/pr';
 
@@ -227,14 +235,25 @@ describe('DashboardApp', () => {
     await wrapper.find('.bucket-chip').trigger('click');
     expect(wrapper.find('#waiting-heading').exists()).toBe(true);
 
-    // Filter by repository via By Repository -> updates KPI tiles and shows repo chip
-    const repoRows = wrapper.findAll('.repo-row');
-    await repoRows[0]!.trigger('click');
-    expect(window.location.search).toContain('repo=');
+    // Filter repositories via checkboxes: all start checked, unchecking one filters it out and updates KPIs
+    const toggleAll = wrapper.find<HTMLInputElement>('#toggle-all-repos');
+    expect(toggleAll.element.checked).toBe(true);
+    expect(toggleAll.element.indeterminate).toBe(false);
+
+    const webAppCheckbox = wrapper
+      .findAll('.repo-row')
+      .find((row) => row.text().includes('web-app'))!
+      .find<HTMLInputElement>('input[type="checkbox"]');
+    await webAppCheckbox.setValue(false);
+    expect(window.location.search).toContain('repos=');
     expect(wrapper.find('.repo-chip').exists()).toBe(true);
-    // Scoped KPI: Ready to Merge updates from 1 to 0 when filtering to acme/core-api
+    expect(toggleAll.element.checked).toBe(false);
+    expect(toggleAll.element.indeterminate).toBe(true);
+    // Scoped KPI: Ready to Merge updates from 1 to 0 when acme/web-app is unchecked
     expect(wrapper.findAll('.kpi-tile')[1]!.find('.kpi-value').text()).toBe('0');
     await wrapper.find('.repo-chip').trigger('click');
+    expect(toggleAll.element.checked).toBe(true);
+    expect(toggleAll.element.indeterminate).toBe(false);
 
     // Toggle Include drafts checkbox -> includes draft PR in Action Queue & updates URL
     await wrapper.find('#include-drafts').setValue(true);
@@ -257,8 +276,23 @@ describe('DashboardApp', () => {
     });
     const detail = makeDetail();
 
+    const detail2: PrDetailResponse = {
+      ...detail,
+      key: 'acme/web-app#202',
+      repo: 'web-app',
+      number: 202,
+      title: 'feat: dark theme tokens',
+      bodyExcerpt: 'Adds light-dark CSS custom properties.',
+    };
+
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/web-app/202')) {
+        return new Response(JSON.stringify(detail2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       if (url.startsWith('/api/pull/')) {
         return new Response(JSON.stringify(detail), {
           status: 200,
@@ -272,27 +306,29 @@ describe('DashboardApp', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    // Stub dialog showModal/close for happy-dom
-    HTMLDialogElement.prototype.showModal = vi.fn<() => void>(function (this: HTMLDialogElement) {
-      this.setAttribute('open', '');
-    });
-    HTMLDialogElement.prototype.close = vi.fn<() => void>(function (this: HTMLDialogElement) {
-      this.removeAttribute('open');
-      this.dispatchEvent(new Event('close'));
-    });
-
     const wrapper = mountWithDeps(DashboardApp);
     await flushPromises();
 
     expect(wrapper.find('.warning-strip').text()).toContain('Rate Limited');
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
 
-    // Click first PR card to open inspector
-    await wrapper.find('.pr-card-trigger').trigger('click');
+    // Click first PR card to open non-modal inspector drawer
+    const triggers = wrapper.findAll('.pr-card-trigger');
+    await triggers[0]!.trigger('click');
     await flushPromises();
 
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
     expect(wrapper.find('.inspector-dialog').text()).toContain('Stabilizes backoff jitter');
     expect(wrapper.find('.inspector-dialog').text()).toContain('abc1234: fix jitter clamp');
+
+    // Switch directly to second PR while drawer is open -> updates drawer in place
+    await triggers[1]!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+    expect(wrapper.find('.inspector-dialog').text()).toContain('feat: dark theme tokens');
+    expect(wrapper.find('.inspector-dialog').text()).toContain(
+      'Adds light-dark CSS custom properties.',
+    );
 
     wrapper.unmount();
   });
@@ -736,6 +772,85 @@ describe('DashboardApp', () => {
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
     expect(wrapper.find('.action-queue').text()).toContain('acme/docs#79');
     expect(wrapper.find('#waiting-heading').exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('supports multi-repository checkbox filtering, header toggle-all, and URL serialization', async () => {
+    const allRepos = ['acme/core-api', 'acme/web-app', 'acme/worker', 'acme/docs'];
+
+    // Pure selection FSM & URL helpers
+    const withoutCore = toggleRepoInSelection(ALL_REPOS_SELECTION, 'acme/core-api', allRepos);
+    expect(withoutCore).toEqual({
+      mode: 'subset',
+      repos: ['acme/docs', 'acme/web-app', 'acme/worker'],
+    });
+    expect(toggleAllReposSelection(withoutCore, allRepos)).toEqual(ALL_REPOS_SELECTION);
+    expect(toggleAllReposSelection(ALL_REPOS_SELECTION, allRepos)).toEqual(NO_REPOS_SELECTION);
+    expect(toggleRepoInSelection(NO_REPOS_SELECTION, 'acme/web-app', allRepos)).toEqual({
+      mode: 'subset',
+      repos: ['acme/web-app'],
+    });
+    expect(parseFiltersFromSearch('?repos=none').repoSelection).toEqual(NO_REPOS_SELECTION);
+    expect(parseFiltersFromSearch('?repo=acme/web-app').repoSelection).toEqual({
+      mode: 'subset',
+      repos: ['acme/web-app'],
+    });
+    expect(
+      serializeFiltersToSearch({
+        view: 'all',
+        bucket: '',
+        q: '',
+        repoSelection: { mode: 'subset', repos: ['acme/web-app', 'acme/core-api'] },
+        drafts: false,
+      }),
+    ).toBe('?repos=acme%2Fcore-api%2Cacme%2Fweb-app');
+
+    const snap = makeSnapshot();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(snap), { status: 200 })),
+    );
+
+    const wrapper = mountWithDeps(DashboardApp);
+    await flushPromises();
+
+    const toggleAll = wrapper.find<HTMLInputElement>('#toggle-all-repos');
+    expect(toggleAll.element.checked).toBe(true);
+
+    // Uncheck all via header toggle -> 0 PRs shown, 'No repos' chip, ?repos=none
+    await toggleAll.setValue(false);
+    expect(toggleAll.element.checked).toBe(false);
+    expect(toggleAll.element.indeterminate).toBe(false);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(0);
+    expect(wrapper.find('.repo-chip').text()).toContain('No repos');
+    expect(window.location.search).toContain('repos=none');
+
+    // Check only core-api and web-app -> shows both PRs and '2 repos' chip
+    const coreCheck = wrapper
+      .findAll('.repo-row')
+      .find((r) => r.text().includes('core-api'))!
+      .find<HTMLInputElement>('input[type="checkbox"]');
+    const webCheck = wrapper
+      .findAll('.repo-row')
+      .find((r) => r.text().includes('web-app'))!
+      .find<HTMLInputElement>('input[type="checkbox"]');
+
+    await coreCheck.setValue(true);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
+    expect(wrapper.find('.repo-chip').text()).toContain('core-api');
+    expect(toggleAll.element.indeterminate).toBe(true);
+
+    await webCheck.setValue(true);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
+    expect(wrapper.find('.repo-chip').text()).toContain('2 repos');
+
+    // Clicking header toggle while indeterminate restores all repos
+    await toggleAll.setValue(true);
+    expect(toggleAll.element.checked).toBe(true);
+    expect(toggleAll.element.indeterminate).toBe(false);
+    expect(wrapper.find('.repo-chip').exists()).toBe(false);
+    expect(window.location.search).toBe('');
 
     wrapper.unmount();
   });

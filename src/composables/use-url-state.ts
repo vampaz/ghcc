@@ -4,11 +4,19 @@ import type { Bucket } from '@/types/pr';
 export type ViewFilter = 'all' | 'mine' | 'review' | 'team';
 export type BucketFilter = Bucket | 'ci-failing' | '';
 
+export type RepoSelection =
+  | { mode: 'all' }
+  | { mode: 'none' }
+  | { mode: 'subset'; repos: string[] };
+
+export const ALL_REPOS_SELECTION: RepoSelection = { mode: 'all' };
+export const NO_REPOS_SELECTION: RepoSelection = { mode: 'none' };
+
 export interface DashboardFilters {
   view: ViewFilter;
   bucket: BucketFilter;
   q: string;
-  repo: string;
+  repoSelection: RepoSelection;
   drafts: boolean;
 }
 
@@ -22,6 +30,78 @@ const VALID_BUCKETS = new Set<BucketFilter>([
   'ci-failing',
 ]);
 
+export function toggleRepoInSelection(
+  current: RepoSelection,
+  repoName: string,
+  allRepoNames: readonly string[],
+): RepoSelection {
+  const uniqueAll = Array.from(new Set(allRepoNames));
+  if (uniqueAll.length === 0) {
+    return ALL_REPOS_SELECTION;
+  }
+
+  let selected: Set<string>;
+  if (current.mode === 'all') {
+    selected = new Set(uniqueAll);
+  } else if (current.mode === 'none') {
+    selected = new Set<string>();
+  } else {
+    selected = new Set(current.repos);
+  }
+
+  if (selected.has(repoName)) {
+    selected.delete(repoName);
+  } else {
+    selected.add(repoName);
+  }
+
+  if (selected.size === 0) {
+    return NO_REPOS_SELECTION;
+  }
+  if (uniqueAll.every((name) => selected.has(name))) {
+    return ALL_REPOS_SELECTION;
+  }
+  return { mode: 'subset', repos: Array.from(selected).sort() };
+}
+
+export function toggleAllReposSelection(
+  current: RepoSelection,
+  allRepoNames: readonly string[],
+): RepoSelection {
+  const allChecked =
+    current.mode === 'all' ||
+    (current.mode === 'subset' &&
+      allRepoNames.length > 0 &&
+      allRepoNames.every((name) => current.repos.includes(name)));
+  return allChecked ? NO_REPOS_SELECTION : ALL_REPOS_SELECTION;
+}
+
+export function parseRepoSelectionFromParams(params: URLSearchParams): RepoSelection {
+  const rawRepos = params.get('repos');
+  if (rawRepos !== null) {
+    const trimmed = rawRepos.trim();
+    if (trimmed === 'none') {
+      return NO_REPOS_SELECTION;
+    }
+    const list = Array.from(
+      new Set(
+        trimmed
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    ).sort();
+    return list.length > 0 ? { mode: 'subset', repos: list } : ALL_REPOS_SELECTION;
+  }
+
+  const legacyRepo = params.get('repo')?.trim();
+  if (legacyRepo) {
+    return { mode: 'subset', repos: [legacyRepo] };
+  }
+
+  return ALL_REPOS_SELECTION;
+}
+
 export function parseFiltersFromSearch(search: string): DashboardFilters {
   const params = new URLSearchParams(search);
   const rawView = (params.get('view') ?? 'all') as ViewFilter;
@@ -30,7 +110,7 @@ export function parseFiltersFromSearch(search: string): DashboardFilters {
     view: VALID_VIEWS.has(rawView) ? rawView : 'all',
     bucket: VALID_BUCKETS.has(rawBucket) ? rawBucket : '',
     q: params.get('q') ?? '',
-    repo: params.get('repo') ?? '',
+    repoSelection: parseRepoSelectionFromParams(params),
     drafts: params.get('drafts') === '1',
   };
 }
@@ -46,8 +126,10 @@ export function serializeFiltersToSearch(filters: DashboardFilters): string {
   if (filters.q.trim()) {
     params.set('q', filters.q);
   }
-  if (filters.repo) {
-    params.set('repo', filters.repo);
+  if (filters.repoSelection.mode === 'none') {
+    params.set('repos', 'none');
+  } else if (filters.repoSelection.mode === 'subset' && filters.repoSelection.repos.length > 0) {
+    params.set('repos', [...filters.repoSelection.repos].sort().join(','));
   }
   if (filters.drafts) {
     params.set('drafts', '1');
@@ -60,7 +142,7 @@ export function useUrlState() {
   const view = ref<ViewFilter>('all');
   const bucket = ref<BucketFilter>('');
   const q = ref<string>('');
-  const repo = ref<string>('');
+  const repoSelection = ref<RepoSelection>(ALL_REPOS_SELECTION);
   const drafts = ref<boolean>(false);
   const hydrated = ref<boolean>(false);
 
@@ -72,7 +154,7 @@ export function useUrlState() {
     view.value = parsed.view;
     bucket.value = parsed.bucket;
     q.value = parsed.q;
-    repo.value = parsed.repo;
+    repoSelection.value = parsed.repoSelection;
     drafts.value = parsed.drafts;
   }
 
@@ -80,11 +162,11 @@ export function useUrlState() {
     view.value = 'all';
     bucket.value = '';
     q.value = '';
-    repo.value = '';
+    repoSelection.value = ALL_REPOS_SELECTION;
     drafts.value = false;
   }
 
-  watch([view, bucket, q, repo, drafts], () => {
+  watch([view, bucket, q, repoSelection, drafts], () => {
     if (typeof window === 'undefined' || !hydrated.value) {
       return;
     }
@@ -92,7 +174,7 @@ export function useUrlState() {
       view: view.value,
       bucket: bucket.value,
       q: q.value,
-      repo: repo.value,
+      repoSelection: repoSelection.value,
       drafts: drafts.value,
     });
     const nextUrl = `${window.location.pathname}${nextSearch}${window.location.hash}`;
@@ -117,7 +199,7 @@ export function useUrlState() {
     view,
     bucket,
     q,
-    repo,
+    repoSelection,
     drafts,
     resetFilters,
   };

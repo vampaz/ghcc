@@ -234,7 +234,6 @@ const diffWidths = computed(() => {
   container-type: inline-size;
   border-radius: 0.5rem;
   border: 1px solid var(--border-subtle);
-  border-left-width: 4px;
   background-color: var(--bg-surface);
   transition:
     border-color 120ms ease,
