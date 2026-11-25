@@ -159,3 +159,19 @@ npm run format:check
 npm run typecheck
 npm run test
 ```
+
+## End-to-End Tests
+
+Install the Playwright Chromium browser once:
+
+```sh
+./node_modules/.bin/playwright install chromium
+```
+
+Run the browser tests against a production build with a mocked GitHub API:
+
+```sh
+npm run test:e2e
+```
+
+The tests build the app and start it on port `4330` with the boot check disabled. They intercept `/api/snapshot` with fixtures, so no GitHub credentials are required.
