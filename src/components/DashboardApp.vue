@@ -63,8 +63,10 @@
           :active-bucket="bucket"
           :has-filters="hasActiveFilters"
           :sync-states="syncStates"
+          :draft-states="draftStates"
           @select="onSelectPr"
           @sync="syncPullRequest"
+          @toggle-draft="togglePullDraft"
         >
           <template #inline-inspector="{ pr }">
             <PrInspector
@@ -74,9 +76,11 @@
               :inspector="inspector"
               :now-ms="nowMs"
               :sync-state="syncStates[pr.key]"
+              :draft-state="draftStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
+              @toggle-draft="togglePullDraft"
             />
           </template>
         </ActionQueue>
@@ -88,8 +92,10 @@
             :selected-key="activeKey"
             :now-ms="nowMs"
             :sync-states="syncStates"
+            :draft-states="draftStates"
             @select="onSelectPr"
             @sync="syncPullRequest"
+            @toggle-draft="togglePullDraft"
           >
             <template #inline-inspector="{ pr }">
               <PrInspector
@@ -99,9 +105,11 @@
                 :inspector="inspector"
                 :now-ms="nowMs"
                 :sync-state="syncStates[pr.key]"
+                :draft-state="draftStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
+                @toggle-draft="togglePullDraft"
               />
             </template>
           </WaitingPanel>
@@ -140,9 +148,11 @@
       :inspector="inspector"
       :now-ms="nowMs"
       :sync-state="selectedPr ? syncStates[selectedPr.key] : undefined"
+      :draft-state="selectedPr ? draftStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
+      @toggle-draft="togglePullDraft"
     />
 
     <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -183,8 +193,10 @@ const {
   announcement,
   inspector,
   syncStates,
+  draftStates,
   fetchSnapshot,
   syncPullRequest,
+  togglePullDraft,
   openInspector,
   closeInspector,
   setPollIntervalMs,
@@ -210,10 +222,6 @@ function matchesOwnership(pr: PrView): boolean {
     return !pr.sources.includes('authored');
   }
   return true;
-}
-
-function isTeamOnlyPr(pr: PrView): boolean {
-  return !pr.sources.includes('authored') && !pr.sources.includes('review-requested');
 }
 
 function matchesSearchAndRepo(pr: PrView): boolean {
@@ -270,13 +278,7 @@ const primaryQueuePulls = computed<PrView[]>(() => {
   if (bucket.value) {
     return filteredBasePulls.value.filter((pr) => pr.bucket === bucket.value);
   }
-  return scopedPulls.value.filter(
-    (pr) =>
-      pr.bucket === 'needs-me' ||
-      pr.bucket === 'ready' ||
-      pr.bucket === 'draft' ||
-      (pr.bucket === 'waiting' && isTeamOnlyPr(pr)),
-  );
+  return scopedPulls.value;
 });
 
 const waitingPullRequests = computed<PrView[]>(() =>
@@ -340,6 +342,30 @@ function isEditableElement(target: EventTarget | null): boolean {
   }
   const tag = target.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+}
+
+const PROTECTED_INSPECTOR_SELECTOR = '.inspector-dialog, .pr-card, .waiting-item';
+let lastPointerDownProtected = false;
+
+function isProtectedInspectorTarget(target: EventTarget | null): boolean {
+  const element =
+    target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+  return Boolean(element?.closest(PROTECTED_INSPECTOR_SELECTOR));
+}
+
+function onGlobalPointerdown(event: PointerEvent): void {
+  lastPointerDownProtected = isProtectedInspectorTarget(event.target);
+}
+
+function onGlobalClick(event: MouseEvent): void {
+  const startedInProtected = lastPointerDownProtected;
+  lastPointerDownProtected = false;
+  if (!isDesktop.value || inspector.value.status === 'closed' || startedInProtected) {
+    return;
+  }
+  if (!isProtectedInspectorTarget(event.target)) {
+    closeInspector();
+  }
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {
@@ -435,11 +461,17 @@ onMounted(() => {
     desktopQuery.addEventListener('change', updateViewportMode);
   }
   window.addEventListener('keydown', onGlobalKeydown);
+  document.addEventListener('pointerdown', onGlobalPointerdown, { capture: true });
+  document.addEventListener('click', onGlobalClick, { capture: true });
 });
 
 onUnmounted(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('keydown', onGlobalKeydown);
+  }
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('pointerdown', onGlobalPointerdown, { capture: true });
+    document.removeEventListener('click', onGlobalClick, { capture: true });
   }
   if (desktopQuery) {
     desktopQuery.removeEventListener('change', updateViewportMode);

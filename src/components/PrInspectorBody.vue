@@ -10,6 +10,21 @@
         <span>by @{{ pr.author }}</span>
       </div>
 
+      <div class="draft-callout">
+        <div class="draft-callout-row">
+          <span class="draft-callout-label">Pull request status</span>
+          <DraftToggle
+            :pr-key="pr.key"
+            :is-draft="pr.isDraft"
+            :draft-state="draftState"
+            @toggle="$emit('toggle-draft', pr, $event)"
+          />
+        </div>
+        <p v-if="draftState.status === 'error'" class="sync-error-note" role="alert">
+          {{ draftState.error }}
+        </p>
+      </div>
+
       <div v-if="showSyncAction" class="sync-callout">
         <div class="sync-callout-row">
           <button
@@ -126,9 +141,12 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import DraftToggle from '@/components/DraftToggle.vue';
 import {
+  IDLE_PR_DRAFT_STATE,
   IDLE_PR_SYNC_STATE,
   type InspectorState,
+  type PrDraftState,
   type PrSyncState,
 } from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
@@ -139,15 +157,18 @@ interface Props {
   inspector: InspectorState;
   nowMs: number;
   syncState?: PrSyncState;
+  draftState?: PrDraftState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
+  draftState: () => IDLE_PR_DRAFT_STATE,
 });
 
 const emit = defineEmits<{
   retry: [pr: PrView];
   sync: [pr: PrView];
+  'toggle-draft': [pr: PrView, nextDraft: boolean];
 }>();
 
 const showSyncAction = computed<boolean>(
@@ -215,6 +236,31 @@ function onSyncClick(): void {
   font-size: 0.75rem;
   color: var(--ink-secondary);
   overflow-wrap: anywhere;
+}
+
+.draft-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+}
+
+.draft-callout-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+}
+
+.draft-callout-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
 }
 
 .sync-callout {

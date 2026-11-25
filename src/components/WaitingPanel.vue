@@ -11,13 +11,8 @@
 
     <ul v-else role="list" class="waiting-list">
       <li v-for="pr in pullRequests" :key="pr.key" class="waiting-item">
-        <div class="waiting-row">
-          <button
-            type="button"
-            class="waiting-btn"
-            :class="{ selected: selectedKey === pr.key }"
-            @click="$emit('select', pr)"
-          >
+        <div class="waiting-row" :class="{ selected: selectedKey === pr.key }">
+          <button type="button" class="waiting-btn" @click="$emit('select', pr)">
             <span class="waiting-top">
               <span class="waiting-key">
                 <span class="waiting-repo">{{ compactRepo(pr.repository) }}</span>
@@ -31,27 +26,41 @@
             <span class="waiting-title">{{ pr.title }}</span>
           </button>
 
-          <button
-            v-if="showSyncButton(pr)"
-            type="button"
-            class="waiting-sync-btn"
-            :class="{
-              synced: getSyncState(pr.key).status === 'synced',
-              syncing: getSyncState(pr.key).status === 'syncing',
-            }"
-            :aria-disabled="isSyncBusy(pr.key) ? 'true' : undefined"
-            :aria-label="syncAriaLabel(pr)"
-            :title="`Merge ${pr.baseRefName} into ${pr.headRefName}`"
-            @click="onSyncClick(pr)"
-          >
-            <progress
-              v-if="getSyncState(pr.key).status === 'syncing'"
-              class="loading-spinner"
-              aria-label="Syncing branch"
-            ></progress>
-            <span>{{ syncButtonText(pr.key) }}</span>
-          </button>
+          <div class="waiting-actions">
+            <DraftToggle
+              compact
+              :pr-key="pr.key"
+              :is-draft="pr.isDraft"
+              :draft-state="getDraftState(pr.key)"
+              @toggle="$emit('toggle-draft', pr, $event)"
+            />
+
+            <button
+              v-if="showSyncButton(pr)"
+              type="button"
+              class="waiting-sync-btn"
+              :class="{
+                synced: getSyncState(pr.key).status === 'synced',
+                syncing: getSyncState(pr.key).status === 'syncing',
+              }"
+              :aria-disabled="isSyncBusy(pr.key) ? 'true' : undefined"
+              :aria-label="syncAriaLabel(pr)"
+              :title="`Merge ${pr.baseRefName} into ${pr.headRefName}`"
+              @click="onSyncClick(pr)"
+            >
+              <progress
+                v-if="getSyncState(pr.key).status === 'syncing'"
+                class="loading-spinner"
+                aria-label="Syncing branch"
+              ></progress>
+              <span>{{ syncButtonText(pr.key) }}</span>
+            </button>
+          </div>
         </div>
+
+        <p v-if="draftError(pr.key)" class="waiting-sync-error" role="alert">
+          {{ draftError(pr.key) }}
+        </p>
 
         <p v-if="syncError(pr.key)" class="waiting-sync-error" role="alert">
           {{ syncError(pr.key) }}
@@ -64,7 +73,13 @@
 </template>
 
 <script setup lang="ts">
-import { IDLE_PR_SYNC_STATE, type PrSyncState } from '@/composables/use-dashboard-state';
+import DraftToggle from '@/components/DraftToggle.vue';
+import {
+  IDLE_PR_DRAFT_STATE,
+  IDLE_PR_SYNC_STATE,
+  type PrDraftState,
+  type PrSyncState,
+} from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
 
@@ -73,16 +88,28 @@ interface Props {
   selectedKey: string | null;
   nowMs: number;
   syncStates?: Record<string, PrSyncState>;
+  draftStates?: Record<string, PrDraftState>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncStates: () => ({}),
+  draftStates: () => ({}),
 });
 
 const emit = defineEmits<{
   select: [pr: PrView];
   sync: [pr: PrView];
+  'toggle-draft': [pr: PrView, nextDraft: boolean];
 }>();
+
+function getDraftState(prKey: string): PrDraftState {
+  return props.draftStates[prKey] ?? IDLE_PR_DRAFT_STATE;
+}
+
+function draftError(prKey: string): string | null {
+  const state = getDraftState(prKey);
+  return state.status === 'error' ? state.error : null;
+}
 
 function getSyncState(prKey: string): PrSyncState {
   return props.syncStates[prKey] ?? IDLE_PR_SYNC_STATE;
@@ -205,6 +232,29 @@ function waitingReason(pr: PrView): string {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  padding-inline-end: 0.35rem;
+  border-radius: 0.375rem;
+  border: 1px solid transparent;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.waiting-row:hover {
+  background-color: var(--bg-surface-hover);
+  border-color: var(--border-subtle);
+}
+
+.waiting-row.selected {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+}
+
+.waiting-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
 .waiting-btn {
@@ -213,7 +263,7 @@ function waitingReason(pr: PrView): string {
   min-block-size: 2.25rem;
   padding: 0.45rem 0.5rem;
   border-radius: 0.375rem;
-  border: 1px solid transparent;
+  border: 0;
   background: transparent;
   color: inherit;
   text-align: left;
@@ -266,16 +316,6 @@ function waitingReason(pr: PrView): string {
   color: var(--accent-red);
   font-size: 0.75rem;
   overflow-wrap: anywhere;
-}
-
-.waiting-btn:hover {
-  background-color: var(--bg-surface-hover);
-  border-color: var(--border-subtle);
-}
-
-.waiting-btn.selected {
-  border-color: var(--accent-blue);
-  background-color: var(--accent-blue-bg);
 }
 
 .waiting-top {

@@ -34,8 +34,10 @@
         :inspector="activeInspector"
         :now-ms="nowMs"
         :sync-state="syncState"
+        :draft-state="draftState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
+        @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
       />
     </div>
   </aside>
@@ -54,8 +56,10 @@
       :inspector="inspector"
       :now-ms="nowMs"
       :sync-state="syncState"
+      :draft-state="draftState"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
+      @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
     />
   </section>
 </template>
@@ -64,8 +68,10 @@
 import { computed, ref, watch } from 'vue';
 import PrInspectorBody from '@/components/PrInspectorBody.vue';
 import {
+  IDLE_PR_DRAFT_STATE,
   IDLE_PR_SYNC_STATE,
   type InspectorState,
+  type PrDraftState,
   type PrSyncState,
 } from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
@@ -76,16 +82,19 @@ interface Props {
   inspector: InspectorState;
   nowMs: number;
   syncState?: PrSyncState;
+  draftState?: PrDraftState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
+  draftState: () => IDLE_PR_DRAFT_STATE,
 });
 
 defineEmits<{
   close: [];
   retry: [pr: PrView];
   sync: [pr: PrView];
+  'toggle-draft': [pr: PrView, nextDraft: boolean];
 }>();
 
 const lastOpenPr = ref<PrView | null>(props.pr);

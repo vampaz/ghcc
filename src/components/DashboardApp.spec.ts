@@ -1,7 +1,12 @@
 import { flushPromises } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DashboardApp from '@/components/DashboardApp.vue';
-import { IDLE_PR_SYNC_STATE, transitionPrSyncState } from '@/composables/use-dashboard-state';
+import {
+  IDLE_PR_DRAFT_STATE,
+  IDLE_PR_SYNC_STATE,
+  transitionPrDraftState,
+  transitionPrSyncState,
+} from '@/composables/use-dashboard-state';
 import {
   ALL_REPOS_SELECTION,
   NO_REPOS_SELECTION,
@@ -211,8 +216,8 @@ describe('DashboardApp', () => {
     expect(wrapper.find('#include-drafts').exists()).toBe(true);
     expect((wrapper.find('#include-drafts').element as HTMLInputElement).checked).toBe(false);
     expect(wrapper.find('#repo-filter').exists()).toBe(false);
-    // Primary action queue shows needs-me + ready (2 cards)
-    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
+    // Primary action queue shows all active PRs (needs-me + ready + waiting = 3 cards)
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
     expect(wrapper.text()).toContain('vampaz');
     expect(wrapper.text()).toContain('GQL 4950/5000');
 
@@ -226,14 +231,16 @@ describe('DashboardApp', () => {
 
     // Clear bucket filter via chip
     await wrapper.find('.bucket-chip').trigger('click');
-    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
 
     // Click WAITING KPI tile -> hides right-rail WaitingPanel to avoid duplication
     await kpiTiles[2]!.trigger('click');
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
+    expect(wrapper.find('.action-queue .tag[data-tone="stale"]').text()).toBe('stale');
     expect(wrapper.find('#waiting-heading').exists()).toBe(false);
     await wrapper.find('.bucket-chip').trigger('click');
     expect(wrapper.find('#waiting-heading').exists()).toBe(true);
+    expect(wrapper.findAll('.action-queue .tag[data-tone="stale"]')).toHaveLength(1);
 
     // Filter repositories via checkboxes: all start checked, unchecking one filters it out and updates KPIs
     const toggleAll = wrapper.find<HTMLInputElement>('#toggle-all-repos');
@@ -257,13 +264,13 @@ describe('DashboardApp', () => {
 
     // Toggle Include drafts checkbox -> includes draft PR in Action Queue & updates URL
     await wrapper.find('#include-drafts').setValue(true);
-    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(4);
     expect(wrapper.find('.action-queue').text()).toContain('acme/docs#404');
     expect(window.location.search).toContain('drafts=1');
 
     // Clear resets Include drafts back to unchecked
     await wrapper.find('.clear-btn').trigger('click');
-    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
     expect((wrapper.find('#include-drafts').element as HTMLInputElement).checked).toBe(false);
 
     wrapper.unmount();
@@ -306,11 +313,11 @@ describe('DashboardApp', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const wrapper = mountWithDeps(DashboardApp);
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
     await flushPromises();
 
     expect(wrapper.find('.warning-strip').text()).toContain('Rate Limited');
-    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
 
     // Click first PR card to open non-modal inspector drawer
     const triggers = wrapper.findAll('.pr-card-trigger');
@@ -329,6 +336,27 @@ describe('DashboardApp', () => {
     expect(wrapper.find('.inspector-dialog').text()).toContain(
       'Adds light-dark CSS custom properties.',
     );
+
+    // Clicking inside the open inspector keeps it open
+    await wrapper.find('.inspector-dialog .summary-callout').trigger('click');
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+
+    // Clicking a Waiting on Others PR item keeps the inspector open and switches to it
+    await wrapper.find('.waiting-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+
+    // Clicking outside both the inspector and PR cards (e.g. header / KPI area) closes the drawer
+    await wrapper.find('.app-footer').trigger('click');
+    expect(wrapper.find('.inspector-dialog').classes()).not.toContain('open');
+
+    // Re-open and verify Escape closes the desktop right sidebar
+    await triggers[0]!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).not.toContain('open');
 
     wrapper.unmount();
   });
@@ -585,8 +613,8 @@ describe('DashboardApp', () => {
       const wrapper = mountWithDeps(DashboardApp);
       await flushPromises();
 
-      // Action queue has 1 sync button (behind PR), not on clean PR
-      expect(wrapper.findAll('.action-queue .sync-btn')).toHaveLength(1);
+      // Action queue has 2 sync buttons (behindActionPr + behindWaitingPr), not on clean PR
+      expect(wrapper.findAll('.action-queue .sync-btn')).toHaveLength(2);
       // Waiting panel shows 'behind' reason and 1 sync button
       expect(wrapper.find('.waiting-who').text()).toBe('behind');
       expect(wrapper.findAll('.waiting-sync-btn')).toHaveLength(1);
@@ -609,10 +637,10 @@ describe('DashboardApp', () => {
       await flushPromises();
       expect(updateCalls).toHaveLength(1);
 
-      // Advance timer -> follow-up snapshot refresh removes Sync button once no longer behind
+      // Advance timer -> follow-up snapshot refresh removes Sync button on #101 once no longer behind
       await vi.advanceTimersByTimeAsync(2_100);
       await flushPromises();
-      expect(wrapper.findAll('.action-queue .sync-btn')).toHaveLength(0);
+      expect(wrapper.findAll('.action-queue .sync-btn')).toHaveLength(1);
 
       // Click Sync on waiting panel PR -> surfaces 422 error alert inline
       const waitingSyncBtn = wrapper.find('.waiting-sync-btn');
@@ -742,10 +770,11 @@ describe('DashboardApp', () => {
     const wrapper = mountWithDeps(DashboardApp);
     await flushPromises();
 
-    // Under All: main queue shows myColorPr + teamColorPr (with @sh1ndz tag), NOT myWaitingPr
+    // Under All: main queue shows all 3 active PRs (myColorPr, myWaitingPr, and teamColorPr with @sh1ndz tag)
     const allCards = wrapper.findAll('.action-queue .pr-card');
-    expect(allCards).toHaveLength(2);
+    expect(allCards).toHaveLength(3);
     expect(wrapper.find('.action-queue').text()).toContain('acme/docs#79');
+    expect(wrapper.find('.action-queue').text()).toContain('acme/frontend#5657');
     expect(wrapper.find('.action-queue').text()).toContain('acme/frontend#5579');
     expect(wrapper.find('.action-queue').text()).toContain('@sh1ndz');
     // Right rail Waiting on Others shows only myWaitingPr (no duplicate #5579)
@@ -766,11 +795,12 @@ describe('DashboardApp', () => {
     expect(wrapper.find('.action-queue').text()).toContain('acme/frontend#5579');
     expect(wrapper.find('#waiting-heading').exists()).toBe(false);
 
-    // Clicking Mine tab excludes teamColorPr
+    // Clicking Mine tab shows authored PRs (including authored waiting PR #5657) and excludes teamColorPr
     const mineBtn = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Mine');
     await mineBtn!.trigger('click');
-    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
     expect(wrapper.find('.action-queue').text()).toContain('acme/docs#79');
+    expect(wrapper.find('.action-queue').text()).toContain('acme/frontend#5657');
     expect(wrapper.find('#waiting-heading').exists()).toBe(true);
 
     wrapper.unmount();
@@ -851,6 +881,169 @@ describe('DashboardApp', () => {
     expect(toggleAll.element.indeterminate).toBe(false);
     expect(wrapper.find('.repo-chip').exists()).toBe(false);
     expect(window.location.search).toBe('');
+
+    wrapper.unmount();
+  });
+
+  it('renders Ready/Draft toggle on every PR, updates via API, suppresses no-op clicks, and surfaces errors', async () => {
+    // Verify explicit draft FSM transitions
+    const updating = transitionPrDraftState(IDLE_PR_DRAFT_STATE, {
+      type: 'TOGGLE_REQUEST',
+      targetDraft: true,
+    });
+    expect(updating).toEqual({ status: 'updating', targetDraft: true });
+    const failed = transitionPrDraftState(updating, {
+      type: 'TOGGLE_FAILED',
+      targetDraft: true,
+      error: 'Forbidden',
+    });
+    expect(failed).toEqual({ status: 'error', targetDraft: true, error: 'Forbidden' });
+    const retrying = transitionPrDraftState(failed, {
+      type: 'TOGGLE_REQUEST',
+      targetDraft: true,
+    });
+    expect(retrying).toEqual({ status: 'updating', targetDraft: true });
+    expect(transitionPrDraftState(retrying, { type: 'TOGGLE_SUCCEEDED' })).toEqual(
+      IDLE_PR_DRAFT_STATE,
+    );
+
+    let coreIsDraft = false;
+    let docsIsDraft = true;
+    const draftCalls: Array<{ url: string; body: string }> = [];
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/pull/acme/core-api/101/draft') {
+        const body = String(init?.body ?? '');
+        draftCalls.push({ url, body });
+        const parsed = JSON.parse(body) as { draft: boolean };
+        coreIsDraft = parsed.draft;
+        return new Response(JSON.stringify({ ok: true, isDraft: coreIsDraft }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/pull/acme/docs/404/draft') {
+        const body = String(init?.body ?? '');
+        draftCalls.push({ url, body });
+        const parsed = JSON.parse(body) as { draft: boolean };
+        docsIsDraft = parsed.draft;
+        return new Response(JSON.stringify({ ok: true, isDraft: docsIsDraft }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/pull/acme/worker/303/draft') {
+        draftCalls.push({ url, body: String(init?.body ?? '') });
+        return new Response(JSON.stringify({ error: 'Insufficient permissions' }), {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/pull/')) {
+        return new Response(JSON.stringify({ ...makeDetail(), isDraft: coreIsDraft }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      const base = makeSnapshot();
+      const prs = base.pullRequests.map((p) => {
+        if (p.key === 'acme/core-api#101') {
+          return {
+            ...p,
+            isDraft: coreIsDraft,
+            bucket: coreIsDraft ? ('draft' as const) : ('needs-me' as const),
+          };
+        }
+        if (p.key === 'acme/docs#404') {
+          return {
+            ...p,
+            isDraft: docsIsDraft,
+            bucket: docsIsDraft ? ('draft' as const) : ('ready' as const),
+          };
+        }
+        return p;
+      });
+      return new Response(
+        JSON.stringify({
+          ...base,
+          pullRequests: prs,
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            etag: `"s-${coreIsDraft}-${docsIsDraft}"`,
+          },
+        },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp);
+    await flushPromises();
+
+    // Include drafts so both ready and draft PRs are visible in Action Queue
+    await wrapper.find('#include-drafts').setValue(true);
+    expect(wrapper.findAll('.action-queue .draft-toggle')).toHaveLength(4);
+    expect(wrapper.findAll('.waiting-item .draft-toggle')).toHaveLength(1);
+
+    // Clicking Ready on an already-ready PR (#101) is a no-op
+    const readyBtn101 = wrapper.find('button[aria-label="Ready — acme/core-api#101"]');
+    expect(readyBtn101.attributes('aria-pressed')).toBe('true');
+    await readyBtn101.trigger('click');
+    await flushPromises();
+    expect(draftCalls).toHaveLength(0);
+
+    // Open inspector for #101 -> inspector also shows Ready/Draft toggle
+    await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog .draft-toggle').exists()).toBe(true);
+
+    // Click Draft on #101 card -> posts { draft: true } and updates state
+    const draftBtn101 = wrapper.find(
+      '.action-queue button[aria-label="Draft — acme/core-api#101"]',
+    );
+    await draftBtn101.trigger('click');
+    await flushPromises();
+    expect(draftCalls[0]).toEqual({
+      url: '/api/pull/acme/core-api/101/draft',
+      body: JSON.stringify({ draft: true }),
+    });
+    expect(
+      wrapper
+        .find('.action-queue button[aria-label="Draft — acme/core-api#101"]')
+        .attributes('aria-pressed'),
+    ).toBe('true');
+
+    // Click Ready on draft PR #404 -> posts { draft: false } and marks it ready
+    const readyBtn404 = wrapper.find('.action-queue button[aria-label="Ready — acme/docs#404"]');
+    expect(readyBtn404.attributes('aria-pressed')).toBe('false');
+    await readyBtn404.trigger('click');
+    await flushPromises();
+    expect(draftCalls[1]).toEqual({
+      url: '/api/pull/acme/docs/404/draft',
+      body: JSON.stringify({ draft: false }),
+    });
+    expect(
+      wrapper
+        .find('.action-queue button[aria-label="Ready — acme/docs#404"]')
+        .attributes('aria-pressed'),
+    ).toBe('true');
+
+    // Error on WaitingPanel PR #303 surfaces inline alert without changing state
+    const waitingDraftBtn = wrapper.find(
+      '.waiting-item button[aria-label="Draft — acme/worker#303"]',
+    );
+    await waitingDraftBtn.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.waiting-sync-error').text()).toContain('Insufficient permissions');
+    expect(
+      wrapper
+        .find('.waiting-item button[aria-label="Ready — acme/worker#303"]')
+        .attributes('aria-pressed'),
+    ).toBe('true');
 
     wrapper.unmount();
   });

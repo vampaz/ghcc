@@ -22,6 +22,14 @@
             <span v-if="!pr.sources.includes('authored')" class="tag" data-tone="muted">
               @{{ pr.author }}
             </span>
+            <span
+              v-if="pr.idleDays > 3"
+              class="tag"
+              data-tone="stale"
+              :title="`No commits for ${pr.idleDays} days`"
+            >
+              stale
+            </span>
             <span v-if="reviewBadge" class="tag" data-tone="amber">{{ reviewBadge }}</span>
             <span v-else-if="pr.bucket === 'ready'" class="tag" data-tone="ok">ready</span>
             <span v-else-if="pr.mergeQueue" class="tag" data-tone="blue">
@@ -73,6 +81,13 @@
       </button>
 
       <div class="pr-card-actions">
+        <DraftToggle
+          :pr-key="pr.key"
+          :is-draft="pr.isDraft"
+          :draft-state="draftState"
+          @toggle="$emit('toggle-draft', pr, $event)"
+        />
+
         <button
           v-if="showSyncButton"
           type="button"
@@ -107,6 +122,10 @@
       </div>
     </div>
 
+    <p v-if="draftState.status === 'error'" class="sync-error" role="alert">
+      {{ draftState.error }}
+    </p>
+
     <p v-if="syncState.status === 'error'" class="sync-error" role="alert">
       {{ syncState.error }}
     </p>
@@ -117,7 +136,13 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { IDLE_PR_SYNC_STATE, type PrSyncState } from '@/composables/use-dashboard-state';
+import DraftToggle from '@/components/DraftToggle.vue';
+import {
+  IDLE_PR_DRAFT_STATE,
+  IDLE_PR_SYNC_STATE,
+  type PrDraftState,
+  type PrSyncState,
+} from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
 
@@ -126,15 +151,18 @@ interface Props {
   isSelected: boolean;
   nowMs: number;
   syncState?: PrSyncState;
+  draftState?: PrDraftState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
+  draftState: () => IDLE_PR_DRAFT_STATE,
 });
 
 const emit = defineEmits<{
   select: [pr: PrView];
   sync: [pr: PrView];
+  'toggle-draft': [pr: PrView, nextDraft: boolean];
 }>();
 
 const showSyncButton = computed<boolean>(
@@ -264,6 +292,18 @@ const diffWidths = computed(() => {
   background-color: var(--bg-stale-hot);
 }
 
+.pr-card:hover {
+  background-color: var(--bg-surface-hover);
+}
+
+.pr-card.stale-warm:hover {
+  background-color: color-mix(in srgb, var(--bg-stale-warm) 92%, var(--ink-primary) 8%);
+}
+
+.pr-card.stale-hot:hover {
+  background-color: color-mix(in srgb, var(--bg-stale-hot) 92%, var(--ink-primary) 8%);
+}
+
 .pr-card.selected {
   border-color: var(--accent-blue);
   box-shadow: 0 0 0 1px var(--accent-blue);
@@ -290,10 +330,6 @@ const diffWidths = computed(() => {
   text-align: left;
   cursor: pointer;
   border-radius: 0.375rem;
-}
-
-.pr-card-trigger:hover {
-  background-color: var(--bg-surface-hover);
 }
 
 .pr-top-row {
@@ -325,6 +361,12 @@ const diffWidths = computed(() => {
   border: 1px solid var(--border-subtle);
   background-color: var(--bg-surface-muted);
   color: var(--ink-secondary);
+}
+
+.tag[data-tone='stale'] {
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+  border-color: color-mix(in srgb, var(--accent-amber) 45%, transparent);
 }
 
 .tag[data-tone='amber'] {
@@ -440,6 +482,7 @@ const diffWidths = computed(() => {
 .pr-card-actions {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 0.4rem;

@@ -198,3 +198,8 @@ export interface UpdateBranchResponse {
   message: string;
   url?: string;
 }
+
+export interface ToggleDraftResponse {
+  ok: true;
+  isDraft: boolean;
+}

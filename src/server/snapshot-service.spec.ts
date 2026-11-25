@@ -88,6 +88,7 @@ describe('snapshot-service & state machine', () => {
         cost: 0,
       }),
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
     };
 
     const service = createSnapshotService({
@@ -142,6 +143,7 @@ describe('snapshot-service & state machine', () => {
         cost: 0,
       }),
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
     };
 
     const service = createSnapshotService({
@@ -209,6 +211,7 @@ describe('snapshot-service & state machine', () => {
         cost: 0,
       }),
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
     };
 
     const service = createSnapshotService({
@@ -271,6 +274,7 @@ describe('snapshot-service & state machine', () => {
         cost: 0,
       }),
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
     };
 
     const service = createSnapshotService({
@@ -323,6 +327,7 @@ describe('snapshot-service & state machine', () => {
       probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
       fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
     };
 
     const service = createSnapshotService({

@@ -8,6 +8,7 @@ import type {
   PrTimelineItem,
   RateLimitBucket,
   SnapshotWarning,
+  ToggleDraftResponse,
   UpdateBranchResponse,
 } from '@/types/pr';
 
@@ -335,6 +336,39 @@ query PullDetail($owner: String!, $repo: String!, $number: Int!) {
 }
 `;
 
+const PULL_NODE_ID_QUERY = `
+query PullNodeId($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+      isDraft
+    }
+  }
+}
+`;
+
+const CONVERT_PR_TO_DRAFT_MUTATION = `
+mutation ConvertPullRequestToDraft($pullRequestId: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $pullRequestId }) {
+    pullRequest {
+      id
+      isDraft
+    }
+  }
+}
+`;
+
+const MARK_PR_READY_MUTATION = `
+mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    pullRequest {
+      id
+      isDraft
+    }
+  }
+}
+`;
+
 export class GitHubAuthError extends Error {
   constructor(message: string) {
     super(message);
@@ -511,6 +545,12 @@ export interface GitHubClient {
     number: number,
     expectedHeadSha?: string,
   ): Promise<UpdateBranchResponse>;
+  setPullDraftState(
+    owner: string,
+    repo: string,
+    number: number,
+    isDraft: boolean,
+  ): Promise<ToggleDraftResponse>;
 }
 
 export interface GitHubClientDeps {
@@ -665,6 +705,25 @@ function mapTimelineNode(node: Record<string, unknown>, index: number): PrTimeli
   };
 }
 
+function mapGraphqlStrictError(
+  errors: GraphQLErrorItem[],
+  token: string,
+  fallbackMessage: string,
+): GitHubApiError | GitHubNotFoundError {
+  const first = errors[0];
+  const msg = redactToken(first?.message?.trim() || fallbackMessage, token);
+  if (first?.type === 'NOT_FOUND') {
+    return new GitHubNotFoundError(msg);
+  }
+  if (first?.type === 'FORBIDDEN' || /forbidden|not authorized|permission|saml|sso/i.test(msg)) {
+    return new GitHubApiError(msg, 403);
+  }
+  if (first?.type === 'UNPROCESSABLE' || /draft|already|cannot|closed|merged/i.test(msg)) {
+    return new GitHubApiError(msg, 422);
+  }
+  return new GitHubApiError(msg, 502);
+}
+
 export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   const fetchFn = deps.fetchFn ?? fetch;
   const now = deps.now ?? (() => Date.now());
@@ -672,14 +731,16 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   async function executeGraphql<TData>(
     query: string,
     variables: Record<string, unknown> = {},
+    options: { allowRetry?: boolean; strictErrors?: boolean } = {},
   ): Promise<{
     data: TData;
     warnings: SnapshotWarning[];
     headerRateLimit: RateLimitBucket | null;
   }> {
     const token = await deps.tokenStore.getToken();
+    const maxAttempts = options.allowRetry === false ? 1 : 2;
     let response!: Response;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         response = await fetchFn(GITHUB_GRAPHQL_URL, {
           method: 'POST',
@@ -698,7 +759,7 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         );
       }
 
-      if ((response.status === 503 || response.status === 504) && attempt === 0) {
+      if ((response.status === 503 || response.status === 504) && attempt + 1 < maxAttempts) {
         await new Promise((resolve) => setTimeout(resolve, 250));
         continue;
       }
@@ -748,6 +809,10 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         `Invalid JSON from GitHub GraphQL: ${sanitizeErrorMessage(error, token)}`,
         502,
       );
+    }
+
+    if (options.strictErrors && payload.errors && payload.errors.length > 0) {
+      throw mapGraphqlStrictError(payload.errors, token, 'GitHub GraphQL mutation failed');
     }
 
     const warnings = parseGraphqlErrors(payload.errors, ssoUrl, token);
@@ -1237,6 +1302,69 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         message,
         ...(typeof parsedBody?.url === 'string' ? { url: parsedBody.url } : {}),
       };
+    },
+
+    async setPullDraftState(
+      owner: string,
+      repo: string,
+      number: number,
+      isDraft: boolean,
+    ): Promise<ToggleDraftResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+
+      interface PullNodeIdData {
+        repository?: {
+          pullRequest?: {
+            id: string;
+            isDraft: boolean;
+          } | null;
+        } | null;
+      }
+
+      const lookup = await executeGraphql<PullNodeIdData>(
+        PULL_NODE_ID_QUERY,
+        { owner: safeOwner, repo: safeRepo, number: safeNum },
+        { strictErrors: true },
+      );
+
+      const pr = lookup.data.repository?.pullRequest;
+      if (!pr) {
+        throw new GitHubNotFoundError(
+          `Pull request ${safeOwner}/${safeRepo}#${safeNum} not found or inaccessible`,
+        );
+      }
+
+      if (pr.isDraft === isDraft) {
+        return { ok: true, isDraft: pr.isDraft };
+      }
+
+      interface DraftMutationData {
+        convertPullRequestToDraft?: {
+          pullRequest?: { id: string; isDraft: boolean } | null;
+        } | null;
+        markPullRequestReadyForReview?: {
+          pullRequest?: { id: string; isDraft: boolean } | null;
+        } | null;
+      }
+
+      const mutation = isDraft ? CONVERT_PR_TO_DRAFT_MUTATION : MARK_PR_READY_MUTATION;
+      const res = await executeGraphql<DraftMutationData>(
+        mutation,
+        { pullRequestId: pr.id },
+        { allowRetry: false, strictErrors: true },
+      );
+
+      const updated = isDraft
+        ? res.data.convertPullRequestToDraft?.pullRequest
+        : res.data.markPullRequestReadyForReview?.pullRequest;
+
+      if (!updated) {
+        throw new GitHubApiError('GitHub did not return updated pull request draft state', 502);
+      }
+
+      return { ok: true, isDraft: updated.isDraft };
     },
   };
 }

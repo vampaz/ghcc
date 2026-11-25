@@ -21,8 +21,10 @@
           :is-selected="selectedKey === pr.key"
           :now-ms="nowMs"
           :sync-state="syncStates[pr.key]"
+          :draft-state="draftStates[pr.key]"
           @select="$emit('select', $event)"
           @sync="$emit('sync', $event)"
+          @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
         >
           <template #inline-inspector>
             <slot name="inline-inspector" :pr="pr" />
@@ -36,7 +38,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import PrCard from '@/components/PrCard.vue';
-import type { PrSyncState } from '@/composables/use-dashboard-state';
+import type { PrDraftState, PrSyncState } from '@/composables/use-dashboard-state';
 import type { BucketFilter } from '@/composables/use-url-state';
 import type { PrView } from '@/types/pr';
 
@@ -48,15 +50,18 @@ interface Props {
   activeBucket: BucketFilter;
   hasFilters: boolean;
   syncStates?: Record<string, PrSyncState>;
+  draftStates?: Record<string, PrDraftState>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncStates: () => ({}),
+  draftStates: () => ({}),
 });
 
 defineEmits<{
   select: [pr: PrView];
   sync: [pr: PrView];
+  'toggle-draft': [pr: PrView, nextDraft: boolean];
 }>();
 
 const headingLabel = computed<string>(() => {

@@ -6,6 +6,7 @@ import type { APIContext } from 'astro';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getHealth } from '@/pages/api/health';
 import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
+import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number]/draft';
 import { POST as postUpdateBranch } from '@/pages/api/pull/[owner]/[repo]/[number]/update-branch';
 import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
 import { GET as getSnapshot } from '@/pages/api/snapshot';
@@ -599,6 +600,219 @@ describe('API routes (mocked fetch)', () => {
     expect(text).not.toContain(TEST_SECRET);
     expect(JSON.parse(text)).toEqual({
       error: 'expected head sha does not match ([REDACTED])',
+    });
+  });
+
+  it('toggles PR draft state via GitHub GraphQL mutations, enforces same-origin, handles idempotency, and invalidates snapshot cache', async () => {
+    let snapshotFetches = 0;
+    let currentIsDraft = false;
+    const queries: Array<{ query: string; variables: Record<string, unknown> }> = [];
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as {
+        query?: string;
+        variables?: Record<string, unknown>;
+      };
+      const q = parsed.query ?? '';
+      queries.push({ query: q, variables: parsed.variables ?? {} });
+
+      if (q.includes('query PullNodeId')) {
+        return jsonResponse({
+          data: {
+            repository: {
+              pullRequest: { id: 'PR_node_42', isDraft: currentIsDraft },
+            },
+          },
+        });
+      }
+      if (q.includes('mutation ConvertPullRequestToDraft')) {
+        currentIsDraft = true;
+        return jsonResponse({
+          data: {
+            convertPullRequestToDraft: {
+              pullRequest: { id: 'PR_node_42', isDraft: true },
+            },
+          },
+        });
+      }
+      if (q.includes('mutation MarkPullRequestReadyForReview')) {
+        currentIsDraft = false;
+        return jsonResponse({
+          data: {
+            markPullRequestReadyForReview: {
+              pullRequest: { id: 'PR_node_42', isDraft: false },
+            },
+          },
+        });
+      }
+      if (q.includes('query Snapshot')) {
+        snapshotFetches++;
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{ ...fixtureNoCiRollup, isDraft: currentIsDraft }],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    await setupRuntime(fetchFn);
+
+    // Cross-origin POST is rejected without calling GitHub
+    const forbidden = await postToggleDraft(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/draft', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+          body: JSON.stringify({ draft: true }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(forbidden.status).toBe(403);
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // Non-boolean draft payload is rejected with 400
+    const badBody = await postToggleDraft(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/draft', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ draft: 'yes' }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(badBody.status).toBe(400);
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // Prime snapshot cache
+    await getSnapshot(makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')));
+    expect(snapshotFetches).toBe(1);
+
+    // Convert ready PR -> draft
+    const toDraftRes = await postToggleDraft(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/draft', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ draft: true }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(toDraftRes.status).toBe(200);
+    expect(await toDraftRes.json()).toEqual({ ok: true, isDraft: true });
+    expect(queries.some((q) => q.query.includes('mutation ConvertPullRequestToDraft'))).toBe(true);
+
+    // Idempotent repeat when already draft skips mutation
+    const mutationsBeforeRepeat = queries.filter((q) =>
+      q.query.includes('mutation ConvertPullRequestToDraft'),
+    ).length;
+    const repeatDraftRes = await postToggleDraft(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/draft', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ draft: true }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(repeatDraftRes.status).toBe(200);
+    expect(
+      queries.filter((q) => q.query.includes('mutation ConvertPullRequestToDraft')).length,
+    ).toBe(mutationsBeforeRepeat);
+
+    // Next snapshot fetch bypasses TTL because cache was invalidated
+    await getSnapshot(makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')));
+    expect(snapshotFetches).toBe(2);
+
+    // Mark draft PR -> ready for review
+    const toReadyRes = await postToggleDraft(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/draft', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ draft: false }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(toReadyRes.status).toBe(200);
+    expect(await toReadyRes.json()).toEqual({ ok: true, isDraft: false });
+    expect(queries.some((q) => q.query.includes('mutation MarkPullRequestReadyForReview'))).toBe(
+      true,
+    );
+  });
+
+  it('redacts tokens and maps GraphQL FORBIDDEN errors on /api/pull/.../draft', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: { repository: { pullRequest: { id: 'PR_node_42', isDraft: false } } },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: { convertPullRequestToDraft: null },
+          errors: [
+            {
+              type: 'FORBIDDEN',
+              message: `Resource not accessible by integration (${TEST_SECRET})`,
+            },
+          ],
+        }),
+      );
+    await setupRuntime(fetchFn);
+
+    const res = await postToggleDraft(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/draft', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ draft: true }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(text).not.toContain(TEST_SECRET);
+    expect(JSON.parse(text)).toEqual({
+      error: 'Resource not accessible by integration ([REDACTED])',
     });
   });
 });

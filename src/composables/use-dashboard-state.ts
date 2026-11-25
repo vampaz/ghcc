@@ -1,5 +1,11 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import type { PrDetailResponse, PrView, SnapshotResponse, UpdateBranchResponse } from '@/types/pr';
+import type {
+  PrDetailResponse,
+  PrView,
+  SnapshotResponse,
+  ToggleDraftResponse,
+  UpdateBranchResponse,
+} from '@/types/pr';
 
 export type ClientUiState = 'initializing' | 'live' | 'refreshing' | 'offline';
 
@@ -22,6 +28,41 @@ export type PrSyncEvent =
   | { type: 'RESET' };
 
 export const IDLE_PR_SYNC_STATE: PrSyncState = { status: 'idle' };
+
+export type PrDraftState =
+  | { status: 'idle' }
+  | { status: 'updating'; targetDraft: boolean }
+  | { status: 'error'; targetDraft: boolean; error: string };
+
+export type PrDraftEvent =
+  | { type: 'TOGGLE_REQUEST'; targetDraft: boolean }
+  | { type: 'TOGGLE_SUCCEEDED' }
+  | { type: 'TOGGLE_FAILED'; targetDraft: boolean; error: string }
+  | { type: 'RESET' };
+
+export const IDLE_PR_DRAFT_STATE: PrDraftState = { status: 'idle' };
+
+export function transitionPrDraftState(current: PrDraftState, event: PrDraftEvent): PrDraftState {
+  if (event.type === 'RESET') {
+    return IDLE_PR_DRAFT_STATE;
+  }
+  switch (current.status) {
+    case 'idle':
+    case 'error':
+      if (event.type === 'TOGGLE_REQUEST') {
+        return { status: 'updating', targetDraft: event.targetDraft };
+      }
+      return current;
+    case 'updating':
+      if (event.type === 'TOGGLE_SUCCEEDED') {
+        return IDLE_PR_DRAFT_STATE;
+      }
+      if (event.type === 'TOGGLE_FAILED') {
+        return { status: 'error', targetDraft: event.targetDraft, error: event.error };
+      }
+      return current;
+  }
+}
 
 export function transitionPrSyncState(current: PrSyncState, event: PrSyncEvent): PrSyncState {
   if (event.type === 'RESET') {
@@ -72,6 +113,7 @@ export function useDashboardState(
   const refreshCooldownNotice = ref<string | null>(null);
   const announcement = ref<string>('');
   const syncStates = ref<Record<string, PrSyncState>>({});
+  const draftStates = ref<Record<string, PrDraftState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -110,6 +152,53 @@ export function useDashboardState(
       ...syncStates.value,
       [prKey]: next,
     };
+  }
+
+  function getDraftState(prKey: string): PrDraftState {
+    return draftStates.value[prKey] ?? IDLE_PR_DRAFT_STATE;
+  }
+
+  function setDraftState(prKey: string, next: PrDraftState): void {
+    if (next.status === 'idle') {
+      if (!(prKey in draftStates.value)) {
+        return;
+      }
+      const copy = { ...draftStates.value };
+      delete copy[prKey];
+      draftStates.value = copy;
+      return;
+    }
+    draftStates.value = {
+      ...draftStates.value,
+      [prKey]: next,
+    };
+  }
+
+  function reconcileDraftStates(data: SnapshotResponse): void {
+    const entries = Object.entries(draftStates.value);
+    if (entries.length === 0) {
+      return;
+    }
+    const prByKey = new Map(data.pullRequests.map((pr) => [pr.key, pr]));
+    let changed = false;
+    const nextMap: Record<string, PrDraftState> = { ...draftStates.value };
+
+    for (const [key, state] of entries) {
+      if (state.status === 'idle') {
+        delete nextMap[key];
+        changed = true;
+        continue;
+      }
+      const updated = prByKey.get(key);
+      if (!updated || (state.status === 'error' && updated.isDraft === state.targetDraft)) {
+        delete nextMap[key];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      draftStates.value = nextMap;
+    }
   }
 
   function reconcileSyncStates(data: SnapshotResponse): void {
@@ -217,6 +306,7 @@ export function useDashboardState(
       clientState.value = 'live';
       nowMs.value = Date.now();
       reconcileSyncStates(data);
+      reconcileDraftStates(data);
       announceSnapshot(data);
     } catch (error) {
       offlineMessage.value =
@@ -302,6 +392,76 @@ export function useDashboardState(
         }),
       );
       announcement.value = `Failed to synchronize ${pr.key}: ${message}`;
+    }
+  }
+
+  async function togglePullDraft(pr: PrView, nextDraft?: boolean): Promise<void> {
+    const targetDraft = nextDraft ?? !pr.isDraft;
+    const current = getDraftState(pr.key);
+    if (current.status === 'updating' || targetDraft === pr.isDraft) {
+      return;
+    }
+
+    setDraftState(pr.key, transitionPrDraftState(current, { type: 'TOGGLE_REQUEST', targetDraft }));
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/draft`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ draft: targetDraft }),
+        },
+      );
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to update draft state (HTTP ${response.status})`);
+      }
+
+      const data = (await response.json()) as ToggleDraftResponse;
+      detailCache.delete(`${pr.key}@${pr.headRefOid}`);
+      setDraftState(
+        pr.key,
+        transitionPrDraftState(getDraftState(pr.key), { type: 'TOGGLE_SUCCEEDED' }),
+      );
+
+      if (snapshot.value) {
+        snapshot.value = {
+          ...snapshot.value,
+          pullRequests: snapshot.value.pullRequests.map((item) =>
+            item.key === pr.key ? { ...item, isDraft: data.isDraft } : item,
+          ),
+        };
+      }
+
+      announcement.value = data.isDraft
+        ? `Converted ${pr.key} to draft.`
+        : `Marked ${pr.key} ready for review.`;
+
+      if (inspector.value.status !== 'closed' && inspector.value.key === pr.key) {
+        void openInspector({ ...pr, isDraft: data.isDraft });
+      }
+
+      if (fetchInFlight) {
+        pendingRefreshAfterSync = true;
+      } else {
+        void fetchSnapshot(false);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update draft state';
+      setDraftState(
+        pr.key,
+        transitionPrDraftState(getDraftState(pr.key), {
+          type: 'TOGGLE_FAILED',
+          targetDraft,
+          error: message,
+        }),
+      );
+      announcement.value = `Failed to update draft state for ${pr.key}: ${message}`;
     }
   }
 
@@ -400,8 +560,10 @@ export function useDashboardState(
     announcement,
     inspector,
     syncStates,
+    draftStates,
     fetchSnapshot,
     syncPullRequest,
+    togglePullDraft,
     openInspector,
     closeInspector,
     setPollIntervalMs,
