@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getHealth } from '@/pages/api/health';
 import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
 import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number]/draft';
+import { POST as postPullLabels } from '@/pages/api/pull/[owner]/[repo]/[number]/labels';
 import { POST as postMergePull } from '@/pages/api/pull/[owner]/[repo]/[number]/merge';
 import { POST as postUpdateBranch } from '@/pages/api/pull/[owner]/[repo]/[number]/update-branch';
 import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
+import { GET as getRepoLabels } from '@/pages/api/repo/[owner]/[repo]/labels';
 import { GET as getSnapshot } from '@/pages/api/snapshot';
 import type { TokenStore } from '@/server/auth';
 import {
@@ -992,5 +994,293 @@ describe('API routes (mocked fetch)', () => {
     expect(JSON.parse(text)).toEqual({
       error: 'Pull Request is not mergeable ([REDACTED])',
     });
+  });
+
+  it('lists repository labels and updates PR labels via GitHub REST API with same-origin enforcement and cache invalidation', async () => {
+    let snapshotFetches = 0;
+    const putCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+
+      if (url.endsWith('/repos/acme/core-api/labels?per_page=100') && method === 'GET') {
+        return jsonResponse([
+          { name: 'frontend', color: '1d76db', description: 'UI changes' },
+          { name: 'backend', color: '#d73a4a', description: 'Server changes' },
+        ]);
+      }
+
+      if (url.endsWith('/repos/acme/core-api/issues/42/labels') && method === 'PUT') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        putCalls.push({ url, body });
+        return jsonResponse([
+          { name: 'backend', color: 'd73a4a', description: 'Server changes' },
+          { name: 'frontend', color: '1d76db', description: 'UI changes' },
+        ]);
+      }
+
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        snapshotFetches++;
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    await setupRuntime(fetchFn);
+
+    // Fetch repo labels -> sorted alphabetically with normalized hex colors
+    const listRes = await getRepoLabels(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/repo/acme/core-api/labels'), {
+        owner: 'acme',
+        repo: 'core-api',
+      }),
+    );
+    expect(listRes.status).toBe(200);
+    expect(await listRes.json()).toEqual({
+      repository: 'acme/core-api',
+      labels: [
+        { name: 'backend', color: 'd73a4a', description: 'Server changes' },
+        { name: 'frontend', color: '1d76db', description: 'UI changes' },
+      ],
+    });
+
+    // Cross-origin POST is rejected
+    const forbidden = await postPullLabels(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/labels', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+          body: JSON.stringify({ labels: ['backend'] }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(forbidden.status).toBe(403);
+
+    // Invalid body is rejected with 400
+    const badBody = await postPullLabels(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/labels', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ labels: 'backend' }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(badBody.status).toBe(400);
+
+    // Prime snapshot cache
+    await getSnapshot(makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')));
+    expect(snapshotFetches).toBe(1);
+
+    // Valid same-origin label update
+    const okRes = await postPullLabels(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/labels', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ labels: ['backend', 'frontend', 'Backend'] }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(okRes.status).toBe(200);
+    expect(await okRes.json()).toEqual({
+      ok: true,
+      labels: [
+        { name: 'backend', color: 'd73a4a', description: 'Server changes' },
+        { name: 'frontend', color: '1d76db', description: 'UI changes' },
+      ],
+    });
+    expect(putCalls[0]).toEqual({
+      url: 'https://api.github.com/repos/acme/core-api/issues/42/labels',
+      body: { labels: ['backend', 'frontend'] },
+    });
+
+    // Snapshot cache invalidated
+    await getSnapshot(makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')));
+    expect(snapshotFetches).toBe(2);
+  });
+
+  it('retries transient GitHub GraphQL timeouts with adaptive page shrink and caches repo labels and PR detail', async () => {
+    const repoPullFirstArgs: number[] = [];
+    let repoLabelFetches = 0;
+    let pullDetailFetches = 0;
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+
+      if (url.endsWith('/repos/acme/core-api/labels?per_page=100') && method === 'GET') {
+        repoLabelFetches++;
+        return jsonResponse([{ name: 'bug', color: 'd73a4a', description: 'Bug' }]);
+      }
+
+      if (url.endsWith('/repos/acme/core-api/issues/42/labels') && method === 'PUT') {
+        return jsonResponse([{ name: 'bug', color: 'd73a4a', description: 'Bug' }]);
+      }
+
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as {
+        query?: string;
+        variables?: { first?: number };
+      };
+
+      if (parsed.query?.includes('query RepoPulls')) {
+        const firstArg = parsed.variables?.first ?? 0;
+        repoPullFirstArgs.push(firstArg);
+        // Simulate GitHub GraphQL timeout for first=12 (fails both executeGraphql attempts), succeeds when shrunk to first=6
+        if (firstArg >= 12) {
+          return jsonResponse({
+            data: null,
+            errors: [
+              {
+                message:
+                  'Something went wrong while executing your query on 2026-11-25T16:37:08Z. Please include `TEST:123` when reporting this issue.',
+              },
+            ],
+          });
+        }
+        return jsonResponse({
+          data: {
+            repository: {
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+
+      if (parsed.query?.includes('query PullDetail')) {
+        pullDetailFetches++;
+        return jsonResponse({
+          data: {
+            repository: {
+              pullRequest: {
+                number: 42,
+                title: 'Cached detail PR',
+                url: 'https://github.com/acme/core-api/pull/42',
+                isDraft: false,
+                bodyText: 'Body',
+                baseRefName: 'main',
+                headRefName: 'feat/cache',
+                latestReviews: { nodes: [] },
+                reviewRequests: { nodes: [] },
+                commits: { nodes: [] },
+                timelineItems: { nodes: [] },
+              },
+            },
+          },
+        });
+      }
+
+      if (parsed.query?.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    await setupRuntime(fetchFn);
+
+    // Snapshot recovers from GraphQL timeout on first=12 by shrinking RepoPulls to first=6
+    const snapRes = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(snapRes.status).toBe(200);
+    const snapBody = (await snapRes.json()) as { state: string; warnings: unknown[] };
+    expect(snapBody.state).toBe('ready');
+    expect(snapBody.warnings).toHaveLength(0);
+    expect(repoPullFirstArgs).toEqual([12, 12, 6]);
+
+    // Repo labels are cached across repeated requests
+    await getRepoLabels(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/repo/acme/core-api/labels'), {
+        owner: 'acme',
+        repo: 'core-api',
+      }),
+    );
+    await getRepoLabels(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/repo/acme/core-api/labels'), {
+        owner: 'acme',
+        repo: 'core-api',
+      }),
+    );
+    expect(repoLabelFetches).toBe(1);
+
+    // PR detail is cached within 30s and invalidated by mutations
+    await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
+        owner: 'acme',
+        repo: 'core-api',
+        number: '42',
+      }),
+    );
+    await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
+        owner: 'acme',
+        repo: 'core-api',
+        number: '42',
+      }),
+    );
+    expect(pullDetailFetches).toBe(1);
+
+    await postPullLabels(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/labels', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ labels: ['bug'] }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
+        owner: 'acme',
+        repo: 'core-api',
+        number: '42',
+      }),
+    );
+    expect(pullDetailFetches).toBe(2);
   });
 });

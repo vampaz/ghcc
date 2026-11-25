@@ -91,6 +91,13 @@ export interface RawPullRequest {
   author?: {
     login: string;
   } | null;
+  labels?: {
+    nodes: Array<{
+      name: string;
+      color: string;
+      description?: string | null;
+    } | null>;
+  } | null;
   latestReviews: {
     nodes: Array<RawReviewNode | null>;
   };

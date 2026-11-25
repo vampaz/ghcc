@@ -71,7 +71,8 @@ export const POST: APIRoute = async ({ params, request }) => {
 
   try {
     const result = await githubClient.setPullDraftState(owner, repo, number, draft);
-    snapshotService.invalidateCache();
+    githubClient.invalidatePullDetailCache?.(owner, repo, number);
+    snapshotService.invalidateCache(`${owner}/${repo}`);
     return new Response(JSON.stringify(result), {
       status: 200,
       headers: {

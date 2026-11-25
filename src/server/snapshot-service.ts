@@ -20,7 +20,8 @@ import type {
 
 export const SNAPSHOT_TTL_MS = 90_000;
 export const REVIEW_QUEUE_TTL_MS = 90_000;
-export const REPO_PULLS_TTL_MS = 90_000;
+export const REPO_PULLS_TTL_MS = 5 * 60_000;
+export const PERSISTED_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 export const MANUAL_REFRESH_COOLDOWN_MS = 10_000;
 export const RATE_LIMIT_BACKOFF_BUFFER_MS = 5_000;
 
@@ -122,7 +123,7 @@ export interface SnapshotServiceDeps {
 export interface SnapshotService {
   getSnapshot(): Promise<SnapshotResult>;
   forceRefresh(): Promise<SnapshotResult>;
-  invalidateCache(): void;
+  invalidateCache(repoKey?: string): void;
   getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState };
 }
 
@@ -164,12 +165,58 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
     warnings: SnapshotWarning[];
   } | null = null;
 
-  let cachedRepoPulls: {
+  interface CachedRepoPullsEntry {
     fetchedAtMs: number;
-    repoKeys: string;
     pullRequests: RawPullRequest[];
     warnings: SnapshotWarning[];
-  } | null = null;
+  }
+
+  const repoPullsCache = new Map<string, CachedRepoPullsEntry>();
+  let persistedHydrated = false;
+  let hydrationInFlight: Promise<void> | null = null;
+
+  async function hydrateFromDiskIfNeeded(currentMs: number): Promise<void> {
+    if (persistedHydrated || cachedResult || lifecycle !== 'idle') {
+      return;
+    }
+    if (hydrationInFlight) {
+      await hydrationInFlight;
+      return;
+    }
+    hydrationInFlight = (async () => {
+      try {
+        const persisted = await deps.stateStore.getLastSnapshot().catch(() => null);
+        if (
+          persisted?.snapshot &&
+          Array.isArray(persisted.snapshot.pullRequests) &&
+          persisted.snapshot.pullRequests.every((p) => Array.isArray(p.labels))
+        ) {
+          const savedMs = Date.parse(persisted.savedAt);
+          const ageMs = Number.isFinite(savedMs) ? currentMs - savedMs : Number.POSITIVE_INFINITY;
+          if (ageMs >= 0 && ageMs < PERSISTED_SNAPSHOT_MAX_AGE_MS && !cachedResult) {
+            cachedResult = {
+              snapshot: persisted.snapshot,
+              etag: computeSnapshotEtag(persisted.snapshot),
+            };
+            lastSnapshotAtMs = savedMs;
+            lastLogin = persisted.snapshot.viewer.login || lastLogin;
+            lastGraphqlLimit = persisted.snapshot.rateLimit.graphql;
+            lastCoreLimit = persisted.snapshot.rateLimit.core;
+            lifecycle = persisted.snapshot.state === 'degraded' ? 'degraded' : 'ready';
+            scheduler = 'scheduled';
+            if (ageMs >= SNAPSHOT_TTL_MS) {
+              // Stale-while-revalidate on warm restart: serve cached snapshot immediately and refresh in background.
+              void triggerFetch(false);
+            }
+          }
+        }
+      } finally {
+        persistedHydrated = true;
+        hydrationInFlight = null;
+      }
+    })();
+    await hydrationInFlight;
+  }
 
   function buildErrorSnapshot(
     nextState: 'rate-limited' | 'auth-error' | 'fatal',
@@ -290,22 +337,26 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         ),
       ).sort();
 
-      let repoPulls: RawPullRequest[] = [];
+      const repoPulls: RawPullRequest[] = [];
       let repoPullsFailed = false;
-      const repoKeys = activeRepos.join(',');
-      const canReuseRepoPulls =
-        cachedRepoPulls !== null &&
-        cachedRepoPulls.repoKeys === repoKeys &&
-        startMs - cachedRepoPulls.fetchedAtMs < REPO_PULLS_TTL_MS;
 
       if (activeRepos.length > 0 && deps.githubClient.fetchRepoPulls) {
-        if (canReuseRepoPulls && cachedRepoPulls) {
-          repoPulls = cachedRepoPulls.pullRequests;
-          warnings.push(...cachedRepoPulls.warnings);
-        } else {
-          const collected: RawPullRequest[] = [];
-          const repoWarnings: SnapshotWarning[] = [];
-          const queue = [...activeRepos];
+        const collected: RawPullRequest[] = [];
+        const repoWarnings: SnapshotWarning[] = [];
+        const staleRepos: string[] = [];
+
+        for (const fullName of activeRepos) {
+          const cached = repoPullsCache.get(fullName);
+          if (cached && startMs - cached.fetchedAtMs < REPO_PULLS_TTL_MS) {
+            collected.push(...cached.pullRequests);
+            repoWarnings.push(...cached.warnings);
+          } else {
+            staleRepos.push(fullName);
+          }
+        }
+
+        if (staleRepos.length > 0) {
+          const queue = [...staleRepos];
           const concurrency = Math.min(2, queue.length);
 
           async function runWorker(): Promise<void> {
@@ -319,10 +370,15 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
                 continue;
               }
               try {
-                const res = await deps.githubClient.fetchRepoPulls(owner, repo);
+                const res = await deps.githubClient.fetchRepoPulls!(owner, repo);
                 if (res.rateLimit) {
                   lastGraphqlLimit = res.rateLimit;
                 }
+                repoPullsCache.set(fullName, {
+                  fetchedAtMs: startMs,
+                  pullRequests: res.pullRequests,
+                  warnings: res.warnings,
+                });
                 collected.push(...res.pullRequests);
                 repoWarnings.push(...res.warnings);
               } catch (err) {
@@ -331,29 +387,28 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
                 }
                 repoPullsFailed = true;
                 const msg = sanitizeErrorMessage(err, deps.tokenStore.peekToken());
-                repoWarnings.push({
-                  code: 'repo-pulls-failed',
-                  message: `Repository pull requests unavailable: ${msg}`,
-                });
+                const fallback = repoPullsCache.get(fullName);
+                if (fallback) {
+                  collected.push(...fallback.pullRequests);
+                  repoWarnings.push({
+                    code: 'repo-pulls-failed',
+                    message: `${fullName} refresh failed (showing cached PRs): ${msg}`,
+                  });
+                } else {
+                  repoWarnings.push({
+                    code: 'repo-pulls-failed',
+                    message: `Repository pull requests unavailable (${fullName}): ${msg}`,
+                  });
+                }
               }
             }
           }
 
           await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
-
-          repoPulls = collected;
-          warnings.push(...repoWarnings);
-          if (!repoPullsFailed) {
-            cachedRepoPulls = {
-              fetchedAtMs: startMs,
-              repoKeys,
-              pullRequests: collected,
-              warnings: repoWarnings,
-            };
-          } else if (cachedRepoPulls && collected.length === 0) {
-            repoPulls = cachedRepoPulls.pullRequests;
-          }
         }
+
+        repoPulls.push(...collected);
+        warnings.push(...repoWarnings);
       }
 
       const merged = mergeRawPullRequests(authored.pullRequests, reviewPulls, repoPulls);
@@ -422,6 +477,14 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         etag: computeSnapshotEtag(snapshot),
       };
       cachedResult = result;
+      persistedHydrated = true;
+      if (snapshot.state === 'ready' || snapshot.pullRequests.length > 0) {
+        await deps.stateStore
+          .setLastSnapshot(snapshot, new Date(startMs).toISOString())
+          .catch(() => {
+            // Best-effort cache persistence; ignore disk errors.
+          });
+      }
       return result;
     } catch (error) {
       const token = deps.tokenStore.peekToken();
@@ -483,6 +546,11 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
   return {
     async getSnapshot(): Promise<SnapshotResult> {
       const currentMs = now();
+      const wasIdle = lifecycle === 'idle' && !cachedResult;
+      await hydrateFromDiskIfNeeded(currentMs);
+      if (wasIdle && cachedResult) {
+        return cachedResult;
+      }
 
       if (lifecycle === 'rate-limited') {
         if (currentMs < backoffUntilMs && cachedResult) {
@@ -524,10 +592,19 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       return triggerFetch(true);
     },
 
-    invalidateCache(): void {
+    invalidateCache(repoKey?: string): void {
       lastSnapshotAtMs = 0;
       cachedReviewQueue = null;
-      cachedRepoPulls = null;
+      if (repoKey) {
+        const entry = repoPullsCache.get(repoKey);
+        if (entry) {
+          entry.fetchedAtMs = 0;
+        }
+      } else {
+        for (const entry of repoPullsCache.values()) {
+          entry.fetchedAtMs = 0;
+        }
+      }
     },
 
     getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState } {

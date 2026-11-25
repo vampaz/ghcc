@@ -39,6 +39,36 @@
         </p>
       </div>
 
+      <div class="draft-callout">
+        <div class="draft-callout-row">
+          <span class="draft-callout-label">Labels</span>
+          <LabelPicker
+            :pr="pr"
+            :repo-labels-state="repoLabelsState"
+            :label-state="labelState"
+            @load-labels="$emit('load-labels', $event)"
+            @retry-load="$emit('retry-load-labels', $event)"
+            @update-labels="(target, labels) => $emit('update-labels', target, labels)"
+          />
+        </div>
+        <div v-if="pr.labels.length > 0" class="inspector-labels-list">
+          <span
+            v-for="label in pr.labels"
+            :key="label.name"
+            class="pr-label-pill"
+            :style="{ '--label-color': `#${label.color}` }"
+            :title="label.description ?? label.name"
+          >
+            <span class="pr-label-dot" aria-hidden="true"></span>
+            <span>{{ label.name }}</span>
+          </span>
+        </div>
+        <p v-else class="empty-note">No labels applied.</p>
+        <p v-if="labelState.status === 'error'" class="sync-error-note" role="alert">
+          {{ labelState.error }}
+        </p>
+      </div>
+
       <div v-if="showSyncAction" class="sync-callout">
         <div class="sync-callout-row">
           <button
@@ -86,37 +116,87 @@
         {{ inspector.detail.bodyExcerpt }}
       </p>
 
-      <section class="detail-section" aria-label="Checks">
-        <h2 class="detail-heading">
-          Checks
-          <span class="mono-num detail-count">
-            {{ inspector.detail.checks.length }}
-            <template v-if="inspector.detail.checksTotalCount > inspector.detail.checks.length">
-              / {{ inspector.detail.checksTotalCount }}
-            </template>
-          </span>
-        </h2>
-        <p v-if="inspector.detail.checks.length === 0" class="empty-note">No checks reported.</p>
-        <ul v-else role="list" class="detail-list">
-          <li
-            v-for="chk in inspector.detail.checks"
-            :key="`${chk.kind}-${chk.name}`"
-            class="detail-row"
+      <section class="detail-section" :aria-labelledby="checksHeadingId">
+        <div class="detail-heading-row">
+          <h2 :id="checksHeadingId" class="detail-heading">
+            Checks
+            <span class="mono-num detail-count">
+              {{ inspector.detail.checks.length }}
+              <template v-if="inspector.detail.checksTotalCount > inspector.detail.checks.length">
+                / {{ inspector.detail.checksTotalCount }}
+              </template>
+            </span>
+          </h2>
+          <button
+            v-if="checkGroups.length > 1"
+            type="button"
+            class="checks-toggle-all-btn"
+            :aria-expanded="allGroupsExpanded ? 'true' : 'false'"
+            @click="toggleAllCheckGroups"
           >
-            <span class="check-badge" :data-bucket="chk.bucket">{{ chk.bucket }}</span>
-            <span class="detail-name">{{ chk.name }}</span>
-            <a
-              v-if="chk.url"
-              :href="chk.url"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="detail-link"
-            >
-              <span>details</span>
-              <CarbonIcon name="launch" :size="12" />
-            </a>
-          </li>
-        </ul>
+            {{ allGroupsExpanded ? 'Collapse all' : 'Expand all' }}
+          </button>
+        </div>
+
+        <p v-if="inspector.detail.checks.length === 0" class="empty-note">No checks reported.</p>
+
+        <div v-else class="check-groups">
+          <details
+            v-for="group in checkGroups"
+            :key="`${pr?.key ?? 'pr'}-${group.id}`"
+            class="check-group"
+            :data-bucket="group.bucket"
+            :open="openGroupIds.has(group.id)"
+            @toggle="onGroupToggle(group.id, $event)"
+          >
+            <summary class="check-group-summary">
+              <span class="check-group-chevron" aria-hidden="true">
+                <CarbonIcon name="chevron-down" :size="14" />
+              </span>
+              <span class="check-badge" :data-bucket="group.bucket">{{ group.bucket }}</span>
+              <span class="check-group-label">{{ group.label }}</span>
+              <span class="check-group-counts mono-num">
+                <span v-if="group.failingCount > 0" class="group-count-fail">
+                  {{ group.failingCount }} fail
+                </span>
+                <span v-if="group.pendingCount > 0" class="group-count-pend">
+                  {{ group.pendingCount }} pend
+                </span>
+                <span v-if="group.passingCount > 0" class="group-count-pass">
+                  {{ group.passingCount }} pass
+                </span>
+              </span>
+            </summary>
+
+            <ul role="list" class="detail-list check-group-list">
+              <li
+                v-for="(item, idx) in group.items"
+                :key="`${item.check.kind}-${item.check.name}-${idx}`"
+                class="detail-row"
+              >
+                <span class="check-badge" :data-bucket="item.check.bucket">{{
+                  item.check.bucket
+                }}</span>
+                <span
+                  class="detail-name"
+                  :title="item.displayName !== item.check.name ? item.check.name : undefined"
+                >
+                  {{ item.displayName }}
+                </span>
+                <a
+                  v-if="item.check.url"
+                  :href="item.check.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="detail-link"
+                >
+                  <span>details</span>
+                  <CarbonIcon name="launch" :size="12" />
+                </a>
+              </li>
+            </ul>
+          </details>
+        </div>
       </section>
 
       <section class="detail-section" aria-label="Reviewers">
@@ -160,20 +240,26 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, useId, watch } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
+import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_REPO_LABELS_STATE,
   type InspectorState,
   type PrDraftState,
+  type PrLabelsState,
   type PrMergeState,
   type PrSyncState,
+  type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { MergeMethod, PrView } from '@/types/pr';
+import { type CheckGroup, groupDetailChecks } from '@/utils/check-groups';
 import { formatRelativeAge } from '@/utils/format';
 
 interface Props {
@@ -183,12 +269,16 @@ interface Props {
   syncState?: PrSyncState;
   draftState?: PrDraftState;
   mergeState?: PrMergeState;
+  repoLabelsState?: RepoLabelsState;
+  labelState?: PrLabelsState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
   mergeState: () => IDLE_PR_MERGE_STATE,
+  repoLabelsState: () => IDLE_REPO_LABELS_STATE,
+  labelState: () => IDLE_PR_LABELS_STATE,
 });
 
 const emit = defineEmits<{
@@ -196,6 +286,9 @@ const emit = defineEmits<{
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
+  'load-labels': [pr: PrView];
+  'retry-load-labels': [pr: PrView];
+  'update-labels': [pr: PrView, labels: string[]];
 }>();
 
 const showSyncAction = computed<boolean>(
@@ -224,6 +317,52 @@ const syncAriaLabel = computed<string>(() => {
   }
   return `${syncButtonText.value} for ${props.pr.key}`;
 });
+
+const checksHeadingId = `checks-heading-${useId()}`;
+
+const checkGroups = computed<CheckGroup[]>(() => {
+  if (props.inspector.status !== 'open') {
+    return [];
+  }
+  return groupDetailChecks(props.inspector.detail.checks);
+});
+
+const openGroupIds = ref<Set<string>>(new Set());
+
+watch(
+  () => [props.pr?.key ?? null, props.inspector.status === 'open' ? props.inspector.detail : null],
+  () => {
+    openGroupIds.value = new Set(checkGroups.value.filter((g) => g.defaultOpen).map((g) => g.id));
+  },
+  { immediate: true },
+);
+
+const allGroupsExpanded = computed<boolean>(
+  () =>
+    checkGroups.value.length > 0 && checkGroups.value.every((g) => openGroupIds.value.has(g.id)),
+);
+
+function onGroupToggle(groupId: string, event: Event): void {
+  const details = event.target as HTMLDetailsElement | null;
+  if (!details) {
+    return;
+  }
+  const next = new Set(openGroupIds.value);
+  if (details.open) {
+    next.add(groupId);
+  } else {
+    next.delete(groupId);
+  }
+  openGroupIds.value = next;
+}
+
+function toggleAllCheckGroups(): void {
+  if (allGroupsExpanded.value) {
+    openGroupIds.value = new Set();
+  } else {
+    openGroupIds.value = new Set(checkGroups.value.map((g) => g.id));
+  }
+}
 
 function onSyncClick(): void {
   if (!props.pr || isSyncBusy.value) {
@@ -289,6 +428,13 @@ function onSyncClick(): void {
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--ink-secondary);
+}
+
+.inspector-labels-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 .sync-callout {
@@ -419,6 +565,151 @@ function onSyncClick(): void {
   margin: 0;
   font-size: 0.8rem;
   color: var(--ink-muted);
+}
+
+.detail-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.checks-toggle-all-btn {
+  min-block-size: 1.5rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.checks-toggle-all-btn:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-surface-hover);
+  color: var(--ink-primary);
+}
+
+.check-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.check-group {
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+}
+
+.check-group[data-bucket='failing'] {
+  border-color: color-mix(in srgb, var(--accent-red) 45%, var(--border-subtle));
+}
+
+.check-group-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-block-size: 2.15rem;
+  padding: 0.38rem 0.55rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.8rem;
+  transition: background-color 120ms ease;
+}
+
+.check-group[open] > .check-group-summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.check-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.check-group-summary:hover {
+  background-color: var(--bg-surface-hover);
+}
+
+.check-group-chevron {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-muted);
+  rotate: -90deg;
+}
+
+.check-group[open] > .check-group-summary > .check-group-chevron {
+  rotate: 0deg;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .check-group-chevron {
+    transition: rotate 0.18s ease;
+  }
+}
+
+.check-group-label {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  font-weight: 600;
+  color: var(--ink-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check-group-counts {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.group-count-fail {
+  color: var(--accent-red);
+}
+
+.group-count-pend {
+  color: var(--accent-amber);
+}
+
+.group-count-pass {
+  color: var(--accent-emerald);
+}
+
+.check-group::details-content {
+  interpolate-size: allow-keywords;
+  overflow: clip;
+  contain: layout;
+}
+
+.check-group:not([open])::details-content {
+  block-size: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .check-group::details-content {
+    transition: block-size, content-visibility, display;
+    transition-duration: 0.2s;
+    transition-timing-function: ease-in-out;
+    transition-behavior: allow-discrete;
+  }
+}
+
+.check-group-list {
+  padding: 0.25rem 0.45rem 0.45rem;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom-left-radius: 0.35rem;
+  border-bottom-right-radius: 0.35rem;
+  background-color: var(--bg-surface);
 }
 
 .detail-list {

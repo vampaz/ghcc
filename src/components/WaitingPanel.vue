@@ -24,6 +24,18 @@
               }}</span>
             </span>
             <span class="waiting-title">{{ pr.title }}</span>
+            <span v-if="pr.labels.length > 0" class="waiting-labels">
+              <span
+                v-for="label in pr.labels"
+                :key="label.name"
+                class="pr-label-pill waiting-label-pill"
+                :style="{ '--label-color': `#${label.color}` }"
+                :title="label.description ?? label.name"
+              >
+                <span class="pr-label-dot" aria-hidden="true"></span>
+                <span class="waiting-label-name">{{ label.name }}</span>
+              </span>
+            </span>
           </button>
 
           <div class="waiting-actions">
@@ -374,5 +386,26 @@ function waitingReason(pr: PrView): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.waiting-labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.15rem;
+}
+
+.waiting-label-pill {
+  font-size: 0.65rem;
+  padding: 0.04rem 0.4rem;
+  max-inline-size: 100%;
+  overflow: hidden;
+}
+
+.waiting-label-name {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

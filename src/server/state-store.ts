@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import type { SnapshotResponse } from '@/types/pr';
 
 export interface CachedMergeabilityEntry {
   headRefOid: string;
@@ -14,10 +15,16 @@ export interface ProbeCounterEntry {
   timestamps: string[];
 }
 
+export interface CachedSnapshotEntry {
+  savedAt: string;
+  snapshot: SnapshotResponse;
+}
+
 export interface PersistedState {
   version: 1;
   mergeability: Record<string, CachedMergeabilityEntry>;
   probeCounters: Record<string, ProbeCounterEntry>;
+  lastSnapshot?: CachedSnapshotEntry;
 }
 
 const EMPTY_STATE: PersistedState = {
@@ -50,6 +57,9 @@ export class StateStore {
           version: 1,
           mergeability: { ...parsed.mergeability },
           probeCounters: { ...parsed.probeCounters },
+          ...(parsed.lastSnapshot?.snapshot && typeof parsed.lastSnapshot.savedAt === 'string'
+            ? { lastSnapshot: parsed.lastSnapshot }
+            : {}),
         };
         return this.state;
       }
@@ -100,6 +110,17 @@ export class StateStore {
       headRefOid,
       timestamps: kept,
     };
+    await this.persist();
+  }
+
+  async getLastSnapshot(): Promise<CachedSnapshotEntry | null> {
+    const state = await this.load();
+    return state.lastSnapshot ?? null;
+  }
+
+  async setLastSnapshot(snapshot: SnapshotResponse, savedAt: string): Promise<void> {
+    const state = await this.load();
+    state.lastSnapshot = { savedAt, snapshot };
     await this.persist();
   }
 

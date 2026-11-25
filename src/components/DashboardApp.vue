@@ -65,10 +65,15 @@
           :sync-states="syncStates"
           :draft-states="draftStates"
           :merge-states="mergeStates"
+          :repo-labels-states="repoLabelsStates"
+          :label-states="labelStates"
           @select="onSelectPr"
           @sync="syncPullRequest"
           @toggle-draft="togglePullDraft"
           @request-merge="openMergeConfirm"
+          @load-labels="onLoadLabels"
+          @retry-load-labels="onRetryLoadLabels"
+          @update-labels="updatePullLabels"
         >
           <template #inline-inspector="{ pr }">
             <PrInspector
@@ -80,11 +85,16 @@
               :sync-state="syncStates[pr.key]"
               :draft-state="draftStates[pr.key]"
               :merge-state="mergeStates[pr.key]"
+              :repo-labels-state="repoLabelsStates[pr.repository]"
+              :label-state="labelStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
               @toggle-draft="togglePullDraft"
               @request-merge="openMergeConfirm"
+              @load-labels="onLoadLabels"
+              @retry-load-labels="onRetryLoadLabels"
+              @update-labels="updatePullLabels"
             />
           </template>
         </ActionQueue>
@@ -111,11 +121,16 @@
                 :sync-state="syncStates[pr.key]"
                 :draft-state="draftStates[pr.key]"
                 :merge-state="mergeStates[pr.key]"
+                :repo-labels-state="repoLabelsStates[pr.repository]"
+                :label-state="labelStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
+                @load-labels="onLoadLabels"
+                @retry-load-labels="onRetryLoadLabels"
+                @update-labels="updatePullLabels"
               />
             </template>
           </WaitingPanel>
@@ -156,11 +171,16 @@
       :sync-state="selectedPr ? syncStates[selectedPr.key] : undefined"
       :draft-state="selectedPr ? draftStates[selectedPr.key] : undefined"
       :merge-state="selectedPr ? mergeStates[selectedPr.key] : undefined"
+      :repo-labels-state="selectedPr ? repoLabelsStates[selectedPr.repository] : undefined"
+      :label-state="selectedPr ? labelStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
       @toggle-draft="togglePullDraft"
       @request-merge="openMergeConfirm"
+      @load-labels="onLoadLabels"
+      @retry-load-labels="onRetryLoadLabels"
+      @update-labels="updatePullLabels"
     />
 
     <MergeConfirmDialog
@@ -217,14 +237,26 @@ const {
   syncStates,
   draftStates,
   mergeStates,
+  repoLabelsStates,
+  labelStates,
   fetchSnapshot,
   syncPullRequest,
   togglePullDraft,
   mergePullRequest,
+  loadRepoLabels,
+  updatePullLabels,
   openInspector,
   closeInspector,
   setPollIntervalMs,
 } = useDashboardState();
+
+function onLoadLabels(pr: PrView): void {
+  void loadRepoLabels(pr.owner, pr.repo, false);
+}
+
+function onRetryLoadLabels(pr: PrView): void {
+  void loadRepoLabels(pr.owner, pr.repo, true);
+}
 
 const mergeConfirm = ref<MergeConfirmState>({ status: 'closed' });
 
@@ -281,7 +313,8 @@ function matchesSearchAndRepo(pr: PrView): boolean {
     pr.title.toLowerCase().includes(query) ||
     pr.blockerSummary.toLowerCase().includes(query) ||
     pr.headRefName.toLowerCase().includes(query) ||
-    pr.author.toLowerCase().includes(query)
+    pr.author.toLowerCase().includes(query) ||
+    pr.labels.some((label) => label.name.toLowerCase().includes(query))
   );
 }
 
@@ -386,7 +419,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .merge-menu-popover';
+  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .merge-menu-popover, .label-picker-popover';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {

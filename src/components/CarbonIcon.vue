@@ -25,6 +25,7 @@ export type CarbonIconName =
   | 'renew'
   | 'subtract'
   | 'sun'
+  | 'tag'
   | 'terminal'
   | 'warning-alt'
   | 'warning-filled';

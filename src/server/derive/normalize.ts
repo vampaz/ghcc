@@ -5,7 +5,32 @@ import { deriveBlockerSummary } from '@/server/derive/summary';
 import type { RawPullRequest, RawReviewDecision } from '@/server/derive/types';
 import type { ProbeMergeabilityResult } from '@/server/github-client';
 import type { StateStore } from '@/server/state-store';
-import type { Bucket, PrReviewInfo, PrSource, PrView, SnapshotCounts } from '@/types/pr';
+import type { Bucket, PrLabel, PrReviewInfo, PrSource, PrView, SnapshotCounts } from '@/types/pr';
+
+const SAFE_HEX_COLOR_RE = /^[0-9a-f]{6}$/i;
+
+function normalizeLabels(raw: RawPullRequest): PrLabel[] {
+  const nodes = raw.labels?.nodes;
+  if (!nodes || nodes.length === 0) {
+    return [];
+  }
+  const out: PrLabel[] = [];
+  for (const node of nodes) {
+    if (!node || typeof node.name !== 'string' || !node.name.trim()) {
+      continue;
+    }
+    const rawColor = typeof node.color === 'string' ? node.color.trim().replace(/^#/, '') : '';
+    out.push({
+      name: node.name,
+      color: SAFE_HEX_COLOR_RE.test(rawColor) ? rawColor.toLowerCase() : '64748b',
+      description:
+        typeof node.description === 'string' && node.description.trim().length > 0
+          ? node.description.trim()
+          : null,
+    });
+  }
+  return out;
+}
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -322,6 +347,7 @@ export async function normalizePullRequests(
       headRefName: raw.headRefName,
       headRefOid: raw.headRefOid,
       isDraft: raw.isDraft,
+      labels: normalizeLabels(raw),
       sources,
       bucket,
       myAction,

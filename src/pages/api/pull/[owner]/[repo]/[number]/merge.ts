@@ -88,7 +88,8 @@ export const POST: APIRoute = async ({ params, request }) => {
       mergeMethod,
       expectedHeadSha,
     });
-    snapshotService.invalidateCache();
+    githubClient.invalidatePullDetailCache?.(owner, repo, number);
+    snapshotService.invalidateCache(`${owner}/${repo}`);
     return new Response(JSON.stringify(result), {
       status: 200,
       headers: {

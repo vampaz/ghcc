@@ -6,6 +6,7 @@ import type {
   MergePullResponse,
   PrDetailCheck,
   PrDetailResponse,
+  PrLabel,
   PrReviewerDetail,
   PrTimelineItem,
   RateLimitBucket,
@@ -58,6 +59,13 @@ fragment PrFields on PullRequest {
   author {
     login
   }
+  labels(first: 20) {
+    nodes {
+      name
+      color
+      description
+    }
+  }
   latestReviews(first: 20) {
     nodes {
       state
@@ -96,14 +104,11 @@ fragment PrFields on PullRequest {
                 status
                 conclusion
                 detailsUrl
-                startedAt
-                completedAt
               }
               ... on StatusContext {
                 context
                 state
                 targetUrl
-                description
               }
             }
           }
@@ -163,11 +168,11 @@ ${PR_FIELDS_FRAGMENT}
 `;
 
 const REPO_PULLS_QUERY = `
-query RepoPulls($owner: String!, $repo: String!, $cursor: String) {
+query RepoPulls($owner: String!, $repo: String!, $cursor: String, $first: Int = 12) {
   repository(owner: $owner, name: $repo) {
     pullRequests(
       states: OPEN
-      first: 25
+      first: $first
       after: $cursor
       orderBy: { field: UPDATED_AT, direction: DESC }
     ) {
@@ -559,6 +564,9 @@ export interface GitHubClient {
     number: number,
     options?: { mergeMethod?: MergeMethod; expectedHeadSha?: string },
   ): Promise<MergePullResponse>;
+  fetchRepoLabels(owner: string, repo: string): Promise<PrLabel[]>;
+  setPullLabels(owner: string, repo: string, number: number, labels: string[]): Promise<PrLabel[]>;
+  invalidatePullDetailCache?(owner: string, repo: string, number: number): void;
 }
 
 export interface GitHubClientDeps {
@@ -732,9 +740,35 @@ function mapGraphqlStrictError(
   return new GitHubApiError(msg, 502);
 }
 
+const PULL_DETAIL_CACHE_TTL_MS = 30_000;
+const REPO_LABELS_CACHE_TTL_MS = 5 * 60_000;
+const DEFAULT_REPO_PULLS_PAGE_SIZE = 12;
+const MIN_REPO_PULLS_PAGE_SIZE = 6;
+const TRANSIENT_GRAPHQL_RE =
+  /something went wrong while executing your query|timed?\s*out|bad gateway|service unavailable/i;
+
+function isTransientGraphqlError(error: unknown): boolean {
+  if (!(error instanceof GitHubApiError)) {
+    return false;
+  }
+  if (error.status === 502 || error.status === 503 || error.status === 504) {
+    return true;
+  }
+  return TRANSIENT_GRAPHQL_RE.test(error.message);
+}
+
 export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   const fetchFn = deps.fetchFn ?? fetch;
   const now = deps.now ?? (() => Date.now());
+
+  const pullDetailCache = new Map<string, { fetchedAtMs: number; value: PrDetailResponse }>();
+  const pullDetailInFlight = new Map<string, Promise<PrDetailResponse>>();
+  const repoLabelsCache = new Map<string, { fetchedAtMs: number; value: PrLabel[] }>();
+  const repoLabelsInFlight = new Map<string, Promise<PrLabel[]>>();
+
+  function invalidatePullDetailCache(owner: string, repo: string, number: number): void {
+    pullDetailCache.delete(`${owner}/${repo}#${number}`);
+  }
 
   async function executeGraphql<TData>(
     query: string,
@@ -747,8 +781,9 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   }> {
     const token = await deps.tokenStore.getToken();
     const maxAttempts = options.allowRetry === false ? 1 : 2;
-    let response!: Response;
+
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      let response: Response;
       try {
         response = await fetchFn(GITHUB_GRAPHQL_URL, {
           method: 'POST',
@@ -761,75 +796,87 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
           body: JSON.stringify({ query, variables }),
         });
       } catch (error) {
+        if (attempt + 1 < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          continue;
+        }
         throw new GitHubApiError(
           `GitHub GraphQL network error: ${sanitizeErrorMessage(error, token)}`,
           502,
         );
       }
 
-      if ((response.status === 503 || response.status === 504) && attempt + 1 < maxAttempts) {
+      if (
+        (response.status === 502 || response.status === 503 || response.status === 504) &&
+        attempt + 1 < maxAttempts
+      ) {
         await new Promise((resolve) => setTimeout(resolve, 250));
         continue;
       }
-      break;
-    }
 
-    const headerRateLimit = parseRateLimitHeaders(response.headers);
-    const ssoUrl = parseSsoHeader(response.headers.get('x-github-sso'));
+      const headerRateLimit = parseRateLimitHeaders(response.headers);
+      const ssoUrl = parseSsoHeader(response.headers.get('x-github-sso'));
 
-    if (response.status === 401) {
-      throw new GitHubAuthError('GitHub rejected token (401 Unauthorized)');
-    }
+      if (response.status === 401) {
+        throw new GitHubAuthError('GitHub rejected token (401 Unauthorized)');
+      }
 
-    if (response.status === 403 || response.status === 429) {
-      const bodyText = redactToken(await response.text().catch(() => ''), token);
-      const isRateLimit =
-        response.status === 429 ||
-        headerRateLimit?.remaining === 0 ||
-        response.headers.has('retry-after') ||
-        /rate limit/i.test(bodyText);
-      if (isRateLimit) {
-        const resetAt = parseResetAtFromResponse(response.headers, now());
-        throw new GitHubRateLimitError(
-          `GitHub rate limit exceeded (HTTP ${response.status})`,
-          resetAt,
+      if (response.status === 403 || response.status === 429) {
+        const bodyText = redactToken(await response.text().catch(() => ''), token);
+        const isRateLimit =
+          response.status === 429 ||
+          headerRateLimit?.remaining === 0 ||
+          response.headers.has('retry-after') ||
+          /rate limit/i.test(bodyText);
+        if (isRateLimit) {
+          const resetAt = parseResetAtFromResponse(response.headers, now());
+          throw new GitHubRateLimitError(
+            `GitHub rate limit exceeded (HTTP ${response.status})`,
+            resetAt,
+          );
+        }
+        throw new GitHubApiError(
+          `GitHub API forbidden (HTTP 403)${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`,
+          403,
         );
       }
-      throw new GitHubApiError(
-        `GitHub API forbidden (HTTP 403)${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`,
-        403,
-      );
+
+      if (!response.ok) {
+        const bodyText = redactToken(await response.text().catch(() => ''), token);
+        throw new GitHubApiError(
+          `GitHub GraphQL error HTTP ${response.status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`,
+          response.status,
+        );
+      }
+
+      let payload: GraphQLRawResponse<TData>;
+      try {
+        payload = (await response.json()) as GraphQLRawResponse<TData>;
+      } catch (error) {
+        throw new GitHubApiError(
+          `Invalid JSON from GitHub GraphQL: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      if (options.strictErrors && payload.errors && payload.errors.length > 0) {
+        throw mapGraphqlStrictError(payload.errors, token, 'GitHub GraphQL mutation failed');
+      }
+
+      const warnings = parseGraphqlErrors(payload.errors, ssoUrl, token);
+      if (!payload.data) {
+        const msg = warnings[0]?.message ?? 'GitHub GraphQL returned empty data';
+        if (attempt + 1 < maxAttempts && TRANSIENT_GRAPHQL_RE.test(msg)) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
+        throw new GitHubApiError(msg, 502);
+      }
+
+      return { data: payload.data, warnings, headerRateLimit };
     }
 
-    if (!response.ok) {
-      const bodyText = redactToken(await response.text().catch(() => ''), token);
-      throw new GitHubApiError(
-        `GitHub GraphQL error HTTP ${response.status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`,
-        response.status,
-      );
-    }
-
-    let payload: GraphQLRawResponse<TData>;
-    try {
-      payload = (await response.json()) as GraphQLRawResponse<TData>;
-    } catch (error) {
-      throw new GitHubApiError(
-        `Invalid JSON from GitHub GraphQL: ${sanitizeErrorMessage(error, token)}`,
-        502,
-      );
-    }
-
-    if (options.strictErrors && payload.errors && payload.errors.length > 0) {
-      throw mapGraphqlStrictError(payload.errors, token, 'GitHub GraphQL mutation failed');
-    }
-
-    const warnings = parseGraphqlErrors(payload.errors, ssoUrl, token);
-    if (!payload.data) {
-      const msg = warnings[0]?.message ?? 'GitHub GraphQL returned empty data';
-      throw new GitHubApiError(msg, 502);
-    }
-
-    return { data: payload.data, warnings, headerRateLimit };
+    throw new GitHubApiError('GitHub GraphQL request failed after retries', 502);
   }
 
   return {
@@ -938,38 +985,54 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
     async fetchRepoPulls(owner: string, repo: string, options = {}): Promise<ReviewQueueResult> {
       const safeOwner = validateRepoSegment(owner, 'owner');
       const safeRepo = validateRepoSegment(repo, 'repo');
-      const maxPages = options.maxPages ?? 6;
+      let maxPages = options.maxPages ?? 12;
       const pullRequests: RawPullRequest[] = [];
       const warnings: SnapshotWarning[] = [];
       let cursor: string | null = null;
       let rateLimit: RateLimitBucket | null = null;
       let totalCost = 0;
+      let pageSize = DEFAULT_REPO_PULLS_PAGE_SIZE;
+
+      interface RepoPullsData {
+        repository?: {
+          pullRequests: {
+            pageInfo: { hasNextPage: boolean; endCursor: string | null };
+            nodes: Array<RawPullRequest | null>;
+          };
+        } | null;
+        rateLimit?: {
+          limit: number;
+          cost: number;
+          remaining: number;
+          resetAt: string;
+        };
+      }
 
       for (let page = 0; page < maxPages; page++) {
-        interface RepoPullsData {
-          repository?: {
-            pullRequests: {
-              pageInfo: { hasNextPage: boolean; endCursor: string | null };
-              nodes: Array<RawPullRequest | null>;
-            };
-          } | null;
-          rateLimit?: {
-            limit: number;
-            cost: number;
-            remaining: number;
-            resetAt: string;
-          };
-        }
-
-        const res: {
+        let res!: {
           data: RepoPullsData;
           warnings: SnapshotWarning[];
           headerRateLimit: RateLimitBucket | null;
-        } = await executeGraphql<RepoPullsData>(REPO_PULLS_QUERY, {
-          owner: safeOwner,
-          repo: safeRepo,
-          cursor,
-        });
+        };
+
+        while (true) {
+          try {
+            res = await executeGraphql<RepoPullsData>(REPO_PULLS_QUERY, {
+              owner: safeOwner,
+              repo: safeRepo,
+              cursor,
+              first: pageSize,
+            });
+            break;
+          } catch (error) {
+            if (isTransientGraphqlError(error) && pageSize > MIN_REPO_PULLS_PAGE_SIZE) {
+              pageSize = Math.max(MIN_REPO_PULLS_PAGE_SIZE, Math.floor(pageSize / 2));
+              maxPages = Math.min(24, maxPages * 2);
+              continue;
+            }
+            throw error;
+          }
+        }
 
         warnings.push(...res.warnings);
 
@@ -1077,148 +1140,174 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
       };
     },
 
+    invalidatePullDetailCache(owner: string, repo: string, number: number): void {
+      invalidatePullDetailCache(owner, repo, number);
+    },
+
     async fetchPullDetail(owner: string, repo: string, number: number): Promise<PrDetailResponse> {
       const safeOwner = validateRepoSegment(owner, 'owner');
       const safeRepo = validateRepoSegment(repo, 'repo');
       const safeNum = validatePullNumber(number);
+      const cacheKey = `${safeOwner}/${safeRepo}#${safeNum}`;
+      const cached = pullDetailCache.get(cacheKey);
+      if (cached && now() - cached.fetchedAtMs < PULL_DETAIL_CACHE_TTL_MS) {
+        return cached.value;
+      }
+      const existingFlight = pullDetailInFlight.get(cacheKey);
+      if (existingFlight) {
+        return existingFlight;
+      }
 
-      interface PullDetailData {
-        repository?: {
-          pullRequest?: {
-            number: number;
-            title: string;
-            url: string;
-            isDraft: boolean;
-            bodyText: string;
-            baseRefName: string;
-            headRefName: string;
-            latestReviews: {
-              nodes: Array<{
-                state: PrReviewerDetail['state'];
-                submittedAt: string | null;
-                author: { login: string } | null;
-              } | null>;
-            };
-            reviewRequests: {
-              nodes: Array<{
-                asCodeOwner?: boolean;
-                requestedReviewer:
-                  | { __typename: 'User'; login: string }
-                  | { __typename: 'Team'; slug: string }
-                  | null;
-              } | null>;
-            };
-            commits: {
-              nodes: Array<{
-                commit: {
-                  statusCheckRollup: {
-                    contexts: {
-                      totalCount: number;
-                      nodes: Array<Record<string, unknown> | null>;
-                    };
-                  } | null;
-                };
-              } | null>;
-            };
-            timelineItems: {
-              nodes: Array<Record<string, unknown> | null>;
-            };
+      const loadPromise = (async (): Promise<PrDetailResponse> => {
+        interface PullDetailData {
+          repository?: {
+            pullRequest?: {
+              number: number;
+              title: string;
+              url: string;
+              isDraft: boolean;
+              bodyText: string;
+              baseRefName: string;
+              headRefName: string;
+              latestReviews: {
+                nodes: Array<{
+                  state: PrReviewerDetail['state'];
+                  submittedAt: string | null;
+                  author: { login: string } | null;
+                } | null>;
+              };
+              reviewRequests: {
+                nodes: Array<{
+                  asCodeOwner?: boolean;
+                  requestedReviewer:
+                    | { __typename: 'User'; login: string }
+                    | { __typename: 'Team'; slug: string }
+                    | null;
+                } | null>;
+              };
+              commits: {
+                nodes: Array<{
+                  commit: {
+                    statusCheckRollup: {
+                      contexts: {
+                        totalCount: number;
+                        nodes: Array<Record<string, unknown> | null>;
+                      };
+                    } | null;
+                  };
+                } | null>;
+              };
+              timelineItems: {
+                nodes: Array<Record<string, unknown> | null>;
+              };
+            } | null;
           } | null;
-        } | null;
-      }
+        }
 
-      const res = await executeGraphql<PullDetailData>(PULL_DETAIL_QUERY, {
-        owner: safeOwner,
-        repo: safeRepo,
-        number: safeNum,
-      });
+        const res = await executeGraphql<PullDetailData>(PULL_DETAIL_QUERY, {
+          owner: safeOwner,
+          repo: safeRepo,
+          number: safeNum,
+        });
 
-      const pr = res.data.repository?.pullRequest;
-      if (!pr) {
-        throw new GitHubNotFoundError(`Pull request ${safeOwner}/${safeRepo}#${safeNum} not found`);
-      }
+        const pr = res.data.repository?.pullRequest;
+        if (!pr) {
+          throw new GitHubNotFoundError(
+            `Pull request ${safeOwner}/${safeRepo}#${safeNum} not found`,
+          );
+        }
 
-      const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup ?? null;
-      const checks: PrDetailCheck[] = [];
-      for (const node of rollup?.contexts.nodes ?? []) {
-        if (node) {
-          const mapped = mapCheckToDetail(node);
-          if (mapped) {
-            checks.push(mapped);
+        const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup ?? null;
+        const checks: PrDetailCheck[] = [];
+        for (const node of rollup?.contexts.nodes ?? []) {
+          if (node) {
+            const mapped = mapCheckToDetail(node);
+            if (mapped) {
+              checks.push(mapped);
+            }
           }
         }
-      }
 
-      const reviewerMap = new Map<string, PrReviewerDetail>();
-      for (const rev of pr.latestReviews.nodes) {
-        if (!rev?.author?.login) {
-          continue;
-        }
-        reviewerMap.set(`user:${rev.author.login}`, {
-          login: rev.author.login,
-          kind: 'user',
-          state: rev.state,
-          submittedAt: rev.submittedAt,
-          asCodeOwner: false,
-        });
-      }
-      for (const req of pr.reviewRequests.nodes) {
-        if (!req?.requestedReviewer) {
-          continue;
-        }
-        if (req.requestedReviewer.__typename === 'User') {
-          const existing = reviewerMap.get(`user:${req.requestedReviewer.login}`);
-          reviewerMap.set(`user:${req.requestedReviewer.login}`, {
-            login: req.requestedReviewer.login,
+        const reviewerMap = new Map<string, PrReviewerDetail>();
+        for (const rev of pr.latestReviews.nodes) {
+          if (!rev?.author?.login) {
+            continue;
+          }
+          reviewerMap.set(`user:${rev.author.login}`, {
+            login: rev.author.login,
             kind: 'user',
-            state: 'PENDING',
-            submittedAt: existing?.submittedAt ?? null,
-            asCodeOwner: Boolean(req.asCodeOwner),
-          });
-        } else if (req.requestedReviewer.__typename === 'Team') {
-          reviewerMap.set(`team:${req.requestedReviewer.slug}`, {
-            login: `@${req.requestedReviewer.slug}`,
-            kind: 'team',
-            state: 'PENDING',
-            submittedAt: null,
-            asCodeOwner: Boolean(req.asCodeOwner),
+            state: rev.state,
+            submittedAt: rev.submittedAt,
+            asCodeOwner: false,
           });
         }
-      }
-
-      const timeline: PrTimelineItem[] = [];
-      const tlNodes = pr.timelineItems.nodes;
-      for (let i = 0; i < tlNodes.length; i++) {
-        const node = tlNodes[i];
-        if (!node) {
-          continue;
+        for (const req of pr.reviewRequests.nodes) {
+          if (!req?.requestedReviewer) {
+            continue;
+          }
+          if (req.requestedReviewer.__typename === 'User') {
+            const existing = reviewerMap.get(`user:${req.requestedReviewer.login}`);
+            reviewerMap.set(`user:${req.requestedReviewer.login}`, {
+              login: req.requestedReviewer.login,
+              kind: 'user',
+              state: 'PENDING',
+              submittedAt: existing?.submittedAt ?? null,
+              asCodeOwner: Boolean(req.asCodeOwner),
+            });
+          } else if (req.requestedReviewer.__typename === 'Team') {
+            reviewerMap.set(`team:${req.requestedReviewer.slug}`, {
+              login: `@${req.requestedReviewer.slug}`,
+              kind: 'team',
+              state: 'PENDING',
+              submittedAt: null,
+              asCodeOwner: Boolean(req.asCodeOwner),
+            });
+          }
         }
-        const item = mapTimelineNode(node, i);
-        if (item) {
-          timeline.push(item);
+
+        const timeline: PrTimelineItem[] = [];
+        const tlNodes = pr.timelineItems.nodes;
+        for (let i = 0; i < tlNodes.length; i++) {
+          const node = tlNodes[i];
+          if (!node) {
+            continue;
+          }
+          const item = mapTimelineNode(node, i);
+          if (item) {
+            timeline.push(item);
+          }
         }
+
+        const rawBody = (pr.bodyText ?? '').trim();
+        const bodyExcerpt = rawBody.length > 420 ? `${rawBody.slice(0, 417)}...` : rawBody;
+
+        const detail: PrDetailResponse = {
+          key: `${safeOwner}/${safeRepo}#${pr.number}`,
+          owner: safeOwner,
+          repo: safeRepo,
+          number: pr.number,
+          title: pr.title,
+          url: pr.url,
+          baseRefName: pr.baseRefName,
+          headRefName: pr.headRefName,
+          isDraft: pr.isDraft,
+          bodyExcerpt,
+          checksTotalCount: rollup?.contexts.totalCount ?? checks.length,
+          checks,
+          reviewers: Array.from(reviewerMap.values()),
+          timeline: timeline.reverse(),
+          fetchedAt: new Date(now()).toISOString(),
+        };
+        pullDetailCache.set(cacheKey, { fetchedAtMs: now(), value: detail });
+        return detail;
+      })();
+
+      pullDetailInFlight.set(cacheKey, loadPromise);
+      try {
+        return await loadPromise;
+      } finally {
+        pullDetailInFlight.delete(cacheKey);
       }
-
-      const rawBody = (pr.bodyText ?? '').trim();
-      const bodyExcerpt = rawBody.length > 420 ? `${rawBody.slice(0, 417)}...` : rawBody;
-
-      return {
-        key: `${safeOwner}/${safeRepo}#${pr.number}`,
-        owner: safeOwner,
-        repo: safeRepo,
-        number: pr.number,
-        title: pr.title,
-        url: pr.url,
-        baseRefName: pr.baseRefName,
-        headRefName: pr.headRefName,
-        isDraft: pr.isDraft,
-        bodyExcerpt,
-        checksTotalCount: rollup?.contexts.totalCount ?? checks.length,
-        checks,
-        reviewers: Array.from(reviewerMap.values()),
-        timeline: timeline.reverse(),
-        fetchedAt: new Date(now()).toISOString(),
-      };
     },
 
     async updatePullBranch(
@@ -1481,6 +1570,215 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         message,
         mergeMethod,
       };
+    },
+
+    async fetchRepoLabels(owner: string, repo: string): Promise<PrLabel[]> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const cacheKey = `${safeOwner}/${safeRepo}`;
+      const cached = repoLabelsCache.get(cacheKey);
+      if (cached && now() - cached.fetchedAtMs < REPO_LABELS_CACHE_TTL_MS) {
+        return cached.value;
+      }
+      const existingFlight = repoLabelsInFlight.get(cacheKey);
+      if (existingFlight) {
+        return existingFlight;
+      }
+
+      const loadPromise = (async (): Promise<PrLabel[]> => {
+        const token = await deps.tokenStore.getToken();
+
+        let response: Response;
+        try {
+          response = await fetchFn(
+            `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}/labels?per_page=100`,
+            {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                'User-Agent': 'ghcc/0.1',
+              },
+            },
+          );
+        } catch (error) {
+          throw new GitHubApiError(
+            `Network error loading repository labels: ${sanitizeErrorMessage(error, token)}`,
+            502,
+          );
+        }
+
+        const coreRateLimit = parseRateLimitHeaders(response.headers);
+        if (response.status === 401) {
+          throw new GitHubAuthError('GitHub rejected token loading labels (401 Unauthorized)');
+        }
+        if (response.status === 404) {
+          throw new GitHubNotFoundError(
+            `Repository ${safeOwner}/${safeRepo} labels not found or inaccessible`,
+          );
+        }
+        if (response.status === 403 || response.status === 429) {
+          const isRateLimit =
+            response.status === 429 ||
+            coreRateLimit?.remaining === 0 ||
+            response.headers.has('retry-after');
+          if (isRateLimit) {
+            throw new GitHubRateLimitError(
+              `GitHub REST rate limit exceeded (HTTP ${response.status})`,
+              parseResetAtFromResponse(response.headers, now()),
+            );
+          }
+        }
+        if (!response.ok) {
+          const bodyText = redactToken(await response.text().catch(() => ''), token);
+          throw new GitHubApiError(
+            `GitHub labels fetch failed (HTTP ${response.status})${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`,
+            response.status,
+          );
+        }
+
+        const payload = (await response.json()) as Array<{
+          name?: unknown;
+          color?: unknown;
+          description?: unknown;
+        }>;
+        if (!Array.isArray(payload)) {
+          repoLabelsCache.set(cacheKey, { fetchedAtMs: now(), value: [] });
+          return [];
+        }
+
+        const safeHex = /^[0-9a-f]{6}$/i;
+        const labels = payload
+          .filter((item) => typeof item?.name === 'string' && item.name.trim().length > 0)
+          .map((item) => {
+            const rawColor =
+              typeof item.color === 'string' ? item.color.trim().replace(/^#/, '') : '';
+            return {
+              name: String(item.name),
+              color: safeHex.test(rawColor) ? rawColor.toLowerCase() : '64748b',
+              description:
+                typeof item.description === 'string' && item.description.trim().length > 0
+                  ? item.description.trim()
+                  : null,
+            };
+          })
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+        repoLabelsCache.set(cacheKey, { fetchedAtMs: now(), value: labels });
+        return labels;
+      })();
+
+      repoLabelsInFlight.set(cacheKey, loadPromise);
+      try {
+        return await loadPromise;
+      } finally {
+        repoLabelsInFlight.delete(cacheKey);
+      }
+    },
+
+    async setPullLabels(
+      owner: string,
+      repo: string,
+      number: number,
+      labels: string[],
+    ): Promise<PrLabel[]> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+      const token = await deps.tokenStore.getToken();
+
+      let response: Response;
+      try {
+        response = await fetchFn(
+          `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}/issues/${safeNum}/labels`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': 'ghcc/0.1',
+            },
+            body: JSON.stringify({ labels }),
+          },
+        );
+      } catch (error) {
+        throw new GitHubApiError(
+          `Network error updating pull request labels: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      const coreRateLimit = parseRateLimitHeaders(response.headers);
+      if (response.status === 401) {
+        throw new GitHubAuthError('GitHub rejected token updating labels (401 Unauthorized)');
+      }
+      if (response.status === 404) {
+        throw new GitHubNotFoundError(
+          `Pull request ${safeOwner}/${safeRepo}#${safeNum} not found or inaccessible`,
+        );
+      }
+      if (response.status === 403 || response.status === 429) {
+        const isRateLimit =
+          response.status === 429 ||
+          coreRateLimit?.remaining === 0 ||
+          response.headers.has('retry-after');
+        if (isRateLimit) {
+          throw new GitHubRateLimitError(
+            `GitHub REST rate limit exceeded (HTTP ${response.status})`,
+            parseResetAtFromResponse(response.headers, now()),
+          );
+        }
+      }
+
+      const rawText = await response.text();
+      let parsedBody: unknown = null;
+      if (rawText) {
+        try {
+          parsedBody = JSON.parse(rawText);
+        } catch {
+          parsedBody = null;
+        }
+      }
+
+      if (!response.ok) {
+        const errObj =
+          parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+            ? (parsedBody as { message?: unknown })
+            : null;
+        const rawMessage =
+          typeof errObj?.message === 'string' && errObj.message.trim().length > 0
+            ? errObj.message.trim()
+            : `GitHub label update failed (HTTP ${response.status})`;
+        throw new GitHubApiError(redactToken(rawMessage, token), response.status);
+      }
+
+      if (!Array.isArray(parsedBody)) {
+        return [];
+      }
+      const safeHex = /^[0-9a-f]{6}$/i;
+      return parsedBody
+        .filter(
+          (item): item is { name: string; color?: unknown; description?: unknown } =>
+            Boolean(item) &&
+            typeof item === 'object' &&
+            typeof (item as { name?: unknown }).name === 'string' &&
+            (item as { name: string }).name.trim().length > 0,
+        )
+        .map((item) => {
+          const rawColor =
+            typeof item.color === 'string' ? item.color.trim().replace(/^#/, '') : '';
+          return {
+            name: item.name,
+            color: safeHex.test(rawColor) ? rawColor.toLowerCase() : '64748b',
+            description:
+              typeof item.description === 'string' && item.description.trim().length > 0
+                ? item.description.trim()
+                : null,
+          };
+        });
     },
   };
 }

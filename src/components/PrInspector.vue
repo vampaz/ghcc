@@ -40,10 +40,15 @@
         :sync-state="syncState"
         :draft-state="draftState"
         :merge-state="mergeState"
+        :repo-labels-state="repoLabelsState"
+        :label-state="labelState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
         @request-merge="(target, method) => $emit('request-merge', target, method)"
+        @load-labels="$emit('load-labels', $event)"
+        @retry-load-labels="$emit('retry-load-labels', $event)"
+        @update-labels="(target, labels) => $emit('update-labels', target, labels)"
       />
     </div>
   </aside>
@@ -67,10 +72,15 @@
       :sync-state="syncState"
       :draft-state="draftState"
       :merge-state="mergeState"
+      :repo-labels-state="repoLabelsState"
+      :label-state="labelState"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
       @request-merge="(target, method) => $emit('request-merge', target, method)"
+      @load-labels="$emit('load-labels', $event)"
+      @retry-load-labels="$emit('retry-load-labels', $event)"
+      @update-labels="(target, labels) => $emit('update-labels', target, labels)"
     />
   </section>
 </template>
@@ -81,12 +91,16 @@ import CarbonIcon from '@/components/CarbonIcon.vue';
 import PrInspectorBody from '@/components/PrInspectorBody.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_REPO_LABELS_STATE,
   type InspectorState,
   type PrDraftState,
+  type PrLabelsState,
   type PrMergeState,
   type PrSyncState,
+  type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { MergeMethod, PrView } from '@/types/pr';
 
@@ -98,12 +112,16 @@ interface Props {
   syncState?: PrSyncState;
   draftState?: PrDraftState;
   mergeState?: PrMergeState;
+  repoLabelsState?: RepoLabelsState;
+  labelState?: PrLabelsState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
   mergeState: () => IDLE_PR_MERGE_STATE,
+  repoLabelsState: () => IDLE_REPO_LABELS_STATE,
+  labelState: () => IDLE_PR_LABELS_STATE,
 });
 
 defineEmits<{
@@ -112,6 +130,9 @@ defineEmits<{
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
+  'load-labels': [pr: PrView];
+  'retry-load-labels': [pr: PrView];
+  'update-labels': [pr: PrView, labels: string[]];
 }>();
 
 const lastOpenPr = ref<PrView | null>(props.pr);

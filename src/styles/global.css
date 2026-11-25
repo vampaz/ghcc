@@ -82,6 +82,39 @@ dialog::backdrop {
   overscroll-behavior: contain;
 }
 
+.pr-label-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.08rem 0.48rem;
+  border-radius: 999px;
+  font-size: 0.69rem;
+  font-weight: 600;
+  line-height: 1.4;
+  border: 1px solid
+    light-dark(
+      color-mix(in srgb, var(--label-color, #64748b) 45%, #cbd5e1),
+      color-mix(in srgb, var(--label-color, #64748b) 50%, #324359)
+    );
+  background-color: light-dark(
+    color-mix(in srgb, var(--label-color, #64748b) 16%, #ffffff),
+    color-mix(in srgb, var(--label-color, #64748b) 22%, #121923)
+  );
+  color: light-dark(
+    color-mix(in srgb, var(--label-color, #64748b) 58%, #0f172a),
+    color-mix(in srgb, var(--label-color, #64748b) 42%, #e6edf3)
+  );
+  white-space: nowrap;
+}
+
+.pr-label-dot {
+  inline-size: 0.45rem;
+  block-size: 0.45rem;
+  border-radius: 999px;
+  background-color: var(--label-color, #64748b);
+  flex: none;
+}
+
 .visually-hidden:where(:not(:focus-within, :active)) {
   position: absolute !important;
   clip-path: inset(50%) !important;

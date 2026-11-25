@@ -90,6 +90,8 @@ describe('snapshot-service & state machine', () => {
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
       setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
       mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
     };
 
     const service = createSnapshotService({
@@ -146,6 +148,8 @@ describe('snapshot-service & state machine', () => {
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
       setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
       mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
     };
 
     const service = createSnapshotService({
@@ -215,6 +219,8 @@ describe('snapshot-service & state machine', () => {
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
       setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
       mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
     };
 
     const service = createSnapshotService({
@@ -279,6 +285,8 @@ describe('snapshot-service & state machine', () => {
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
       setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
       mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
     };
 
     const service = createSnapshotService({
@@ -333,6 +341,8 @@ describe('snapshot-service & state machine', () => {
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
       setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
       mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
     };
 
     const service = createSnapshotService({
@@ -352,5 +362,167 @@ describe('snapshot-service & state machine', () => {
     expect(team?.sources).toEqual(['repo']);
     expect(team?.author).toBe('sh1ndz');
     expect(team?.bucket).toBe('waiting');
+  });
+
+  it('caches repo PRs per repository for 5m, preserves cached repo PRs on transient failure, and supports targeted invalidation', async () => {
+    let nowMs = FIXTURE_NOW_MS;
+    const stateStore = await makeStateStore();
+    const otherRepoPr = {
+      ...fixtureDirectReviewRequest,
+      id: 'PR_other_repo_77',
+      number: 77,
+      repository: {
+        nameWithOwner: 'acme/frontend',
+        isArchived: false,
+        isDisabled: false,
+        isLocked: false,
+      },
+    };
+    const teammateDocsPr = {
+      ...fixtureNoCiRollup,
+      id: 'PR_docs_team_901',
+      number: 901,
+      author: { login: 'teammate' },
+    };
+    const teammateFrontendPr = {
+      ...otherRepoPr,
+      id: 'PR_fe_team_902',
+      number: 902,
+      author: { login: 'teammate' },
+    };
+
+    let failDocsRepo = false;
+    const fetchRepoPulls = vi
+      .fn<GitHubClient['fetchRepoPulls']>()
+      .mockImplementation(async (_owner, repo) => {
+        if (repo === 'docs') {
+          if (failDocsRepo) {
+            throw new Error('Something went wrong while executing your query');
+          }
+          return {
+            pullRequests: [fixtureNoCiRollup, teammateDocsPr],
+            rateLimit: null,
+            warnings: [],
+            cost: 1,
+          };
+        }
+        return {
+          pullRequests: [otherRepoPr, teammateFrontendPr],
+          rateLimit: null,
+          warnings: [],
+          cost: 1,
+        };
+      });
+
+    const client: GitHubClient = {
+      fetchAuthoredPulls: vi.fn<GitHubClient['fetchAuthoredPulls']>().mockResolvedValue({
+        login: VIEWER_LOGIN,
+        pullRequests: [fixtureNoCiRollup],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchReviewQueue: vi.fn<GitHubClient['fetchReviewQueue']>().mockResolvedValue({
+        pullRequests: [otherRepoPr],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchRepoPulls,
+      probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
+      fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
+      mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
+    };
+
+    const service = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => nowMs,
+    });
+
+    // Initial fetch loads both repos
+    const first = await service.getSnapshot();
+    expect(first.snapshot.pullRequests).toHaveLength(4);
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(2);
+
+    // At 2 minutes (past 90s snapshot TTL, within 5m repo TTL) -> reuses cached repo PRs
+    nowMs += 120_000;
+    await service.getSnapshot();
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(2);
+
+    // Targeted invalidation of acme/docs only refetches acme/docs, NOT acme/frontend
+    service.invalidateCache('acme/docs');
+    failDocsRepo = true;
+    const degraded = await service.getSnapshot();
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(3);
+    expect(fetchRepoPulls).toHaveBeenLastCalledWith('acme', 'docs');
+    expect(degraded.snapshot.state).toBe('degraded');
+    // Cached PRs from acme/docs are preserved instead of vanishing
+    expect(degraded.snapshot.pullRequests.some((p) => p.number === 901)).toBe(true);
+    expect(degraded.snapshot.pullRequests.some((p) => p.number === 902)).toBe(true);
+    expect(degraded.snapshot.warnings[0]?.message).toContain('showing cached PRs');
+  });
+
+  it('warm-starts from persisted StateStore snapshot after restart', async () => {
+    let nowMs = FIXTURE_NOW_MS;
+    const stateStore = await makeStateStore();
+    const fetchAuthoredPulls = vi.fn<GitHubClient['fetchAuthoredPulls']>().mockResolvedValue({
+      login: VIEWER_LOGIN,
+      pullRequests: [fixtureNoCiRollup],
+      rateLimit: null,
+      warnings: [],
+      cost: 1,
+    });
+    const client: GitHubClient = {
+      fetchAuthoredPulls,
+      fetchReviewQueue: vi.fn<GitHubClient['fetchReviewQueue']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
+      fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
+      mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
+    };
+
+    const service1 = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => nowMs,
+    });
+    await service1.getSnapshot();
+    expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
+
+    // Wait a tick for best-effort disk persistence to flush
+    await stateStore.getLastSnapshot();
+
+    // New service instance (simulating server restart) within 90s serves persisted snapshot without hitting GitHub
+    nowMs += 20_000;
+    const service2 = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => nowMs,
+    });
+    const warmed = await service2.getSnapshot();
+    expect(warmed.snapshot.pullRequests).toHaveLength(1);
+    expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
   });
 });

@@ -76,7 +76,8 @@ export const POST: APIRoute = async ({ params, request }) => {
 
   try {
     const result = await githubClient.updatePullBranch(owner, repo, number, expectedHeadSha);
-    snapshotService.invalidateCache();
+    githubClient.invalidatePullDetailCache?.(owner, repo, number);
+    snapshotService.invalidateCache(`${owner}/${repo}`);
     return new Response(JSON.stringify(result), {
       status: 202,
       headers: {

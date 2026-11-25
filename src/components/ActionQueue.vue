@@ -23,10 +23,15 @@
           :sync-state="syncStates[pr.key]"
           :draft-state="draftStates[pr.key]"
           :merge-state="mergeStates[pr.key]"
+          :repo-labels-state="repoLabelsStates[pr.repository]"
+          :label-state="labelStates[pr.key]"
           @select="$emit('select', $event)"
           @sync="$emit('sync', $event)"
           @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
           @request-merge="(target, method) => $emit('request-merge', target, method)"
+          @load-labels="$emit('load-labels', $event)"
+          @retry-load-labels="$emit('retry-load-labels', $event)"
+          @update-labels="(target, labels) => $emit('update-labels', target, labels)"
         >
           <template #inline-inspector>
             <slot name="inline-inspector" :pr="pr" />
@@ -40,7 +45,13 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import PrCard from '@/components/PrCard.vue';
-import type { PrDraftState, PrMergeState, PrSyncState } from '@/composables/use-dashboard-state';
+import type {
+  PrDraftState,
+  PrLabelsState,
+  PrMergeState,
+  PrSyncState,
+  RepoLabelsState,
+} from '@/composables/use-dashboard-state';
 import type { BucketFilter } from '@/composables/use-url-state';
 import type { MergeMethod, PrView } from '@/types/pr';
 
@@ -54,12 +65,16 @@ interface Props {
   syncStates?: Record<string, PrSyncState>;
   draftStates?: Record<string, PrDraftState>;
   mergeStates?: Record<string, PrMergeState>;
+  repoLabelsStates?: Record<string, RepoLabelsState>;
+  labelStates?: Record<string, PrLabelsState>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncStates: () => ({}),
   draftStates: () => ({}),
   mergeStates: () => ({}),
+  repoLabelsStates: () => ({}),
+  labelStates: () => ({}),
 });
 
 defineEmits<{
@@ -67,6 +82,9 @@ defineEmits<{
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
+  'load-labels': [pr: PrView];
+  'retry-load-labels': [pr: PrView];
+  'update-labels': [pr: PrView, labels: string[]];
 }>();
 
 const headingLabel = computed<string>(() => {

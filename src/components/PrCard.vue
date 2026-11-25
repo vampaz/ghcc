@@ -53,6 +53,19 @@
 
         <span class="pr-summary">{{ pr.blockerSummary }}</span>
 
+        <span v-if="pr.labels.length > 0" class="pr-labels-row">
+          <span
+            v-for="label in pr.labels"
+            :key="label.name"
+            class="pr-label-pill"
+            :style="{ '--label-color': `#${label.color}` }"
+            :title="label.description ?? label.name"
+          >
+            <span class="pr-label-dot" aria-hidden="true"></span>
+            <span>{{ label.name }}</span>
+          </span>
+        </span>
+
         <span class="pr-metrics-row">
           <span class="ci-mini" :title="ciTooltip">
             <span class="ci-mini-track" aria-hidden="true">
@@ -81,6 +94,16 @@
       </button>
 
       <div class="pr-card-actions">
+        <LabelPicker
+          compact
+          :pr="pr"
+          :repo-labels-state="repoLabelsState"
+          :label-state="labelState"
+          @load-labels="$emit('load-labels', $event)"
+          @retry-load="$emit('retry-load-labels', $event)"
+          @update-labels="(target, labels) => $emit('update-labels', target, labels)"
+        />
+
         <MergeControl
           v-if="!pr.isDraft"
           compact
@@ -135,6 +158,10 @@
       </div>
     </div>
 
+    <p v-if="labelState.status === 'error'" class="sync-error" role="alert">
+      {{ labelState.error }}
+    </p>
+
     <p v-if="mergeState.status === 'error'" class="sync-error" role="alert">
       {{ mergeState.error }}
     </p>
@@ -155,14 +182,19 @@
 import { computed } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
+import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_REPO_LABELS_STATE,
   type PrDraftState,
+  type PrLabelsState,
   type PrMergeState,
   type PrSyncState,
+  type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { MergeMethod, PrView } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
@@ -174,12 +206,16 @@ interface Props {
   syncState?: PrSyncState;
   draftState?: PrDraftState;
   mergeState?: PrMergeState;
+  repoLabelsState?: RepoLabelsState;
+  labelState?: PrLabelsState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
   mergeState: () => IDLE_PR_MERGE_STATE,
+  repoLabelsState: () => IDLE_REPO_LABELS_STATE,
+  labelState: () => IDLE_PR_LABELS_STATE,
 });
 
 const emit = defineEmits<{
@@ -187,6 +223,9 @@ const emit = defineEmits<{
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
+  'load-labels': [pr: PrView];
+  'retry-load-labels': [pr: PrView];
+  'update-labels': [pr: PrView, labels: string[]];
 }>();
 
 const showSyncButton = computed<boolean>(
@@ -422,6 +461,13 @@ const diffWidths = computed(() => {
   font-size: 0.8125rem;
   color: var(--ink-secondary);
   overflow-wrap: anywhere;
+}
+
+.pr-labels-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
 }
 
 .pr-metrics-row {

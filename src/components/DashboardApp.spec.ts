@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DashboardApp from '@/components/DashboardApp.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
   transitionPrDraftState,
+  transitionPrLabelsState,
   transitionPrMergeState,
   transitionPrSyncState,
 } from '@/composables/use-dashboard-state';
@@ -34,6 +36,7 @@ function makePrView(overrides: Partial<PrView> = {}): PrView {
     headRefName: 'fix/retry-loop',
     headRefOid: 'oid-101',
     isDraft: false,
+    labels: [],
     sources: ['authored'],
     bucket: 'needs-me',
     myAction: 'fix-ci',
@@ -1199,6 +1202,267 @@ describe('DashboardApp', () => {
       body: { mergeMethod: 'merge', expectedHeadSha: headSha202 },
     });
     expect(dialog.find('.merge-dialog-error').text()).toContain('Protected branch hook declined');
+
+    wrapper.unmount();
+  });
+
+  it('opens GitHub-style label picker on each PR card, filters repo labels, toggles labels via API, and renders colored pills', async () => {
+    // Verify explicit PR labels FSM transitions
+    const saving = transitionPrLabelsState(IDLE_PR_LABELS_STATE, {
+      type: 'SAVE_REQUEST',
+      pendingLabels: ['backend'],
+    });
+    expect(saving).toEqual({ status: 'saving', pendingLabels: ['backend'] });
+    const failed = transitionPrLabelsState(saving, {
+      type: 'SAVE_FAILED',
+      error: 'Forbidden',
+    });
+    expect(failed).toEqual({ status: 'error', error: 'Forbidden' });
+    const retrying = transitionPrLabelsState(failed, {
+      type: 'SAVE_REQUEST',
+      pendingLabels: ['backend'],
+    });
+    expect(transitionPrLabelsState(retrying, { type: 'SAVE_SUCCEEDED' })).toEqual(
+      IDLE_PR_LABELS_STATE,
+    );
+
+    let labels101 = [{ name: 'bug', color: 'd73a4a', description: 'Something is broken' }];
+    const repoLabels = [
+      { name: 'backend', color: '0e8a16', description: 'Backend services' },
+      { name: 'bug', color: 'd73a4a', description: 'Something is broken' },
+      { name: 'frontend', color: '1d76db', description: 'Frontend UI' },
+    ];
+    const postCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/repo/acme/core-api/labels') {
+        return new Response(JSON.stringify({ repository: 'acme/core-api', labels: repoLabels }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/pull/acme/core-api/101/labels') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { labels: string[] };
+        postCalls.push({ url, body });
+        labels101 = repoLabels.filter((l) => body.labels.includes(l.name));
+        return new Response(JSON.stringify({ ok: true, labels: labels101 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const base = makeSnapshot();
+      const prs = base.pullRequests.map((p) => {
+        if (p.key === 'acme/core-api#101') {
+          return { ...p, labels: labels101 };
+        }
+        if (p.key === 'acme/worker#303') {
+          return {
+            ...p,
+            labels: [{ name: 'deploy:staging', color: '5319e7', description: 'Staging deploy' }],
+          };
+        }
+        return p;
+      });
+      return new Response(JSON.stringify({ ...base, pullRequests: prs }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: `"lbl-${labels101.length}"` },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Existing labels render on both Action Queue card #101 and WaitingPanel row #303
+    expect(wrapper.find('.action-queue .pr-labels-row .pr-label-pill').text()).toBe('bug');
+    expect(wrapper.find('.waiting-item .waiting-labels .pr-label-pill').text()).toBe(
+      'deploy:staging',
+    );
+
+    // Open label picker on #101 -> loads repo labels, shows Active labels strip, and lists all 3
+    await wrapper.find('button[aria-label="Labels — acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    const firstCard = wrapper.findAll('.action-queue .pr-card')[0]!;
+    expect(firstCard.findAll('[role="menuitemcheckbox"]')).toHaveLength(3);
+    expect(firstCard.findAll('.picker-active-pill').map((p) => p.text())).toEqual(['bug']);
+
+    // Filter labels by typing "back" -> narrows menu to backend while keeping Active labels visible
+    const filterInput = firstCard.find<HTMLInputElement>('.picker-search');
+    await filterInput.setValue('back');
+    const filteredItems = firstCard.findAll('[role="menuitemcheckbox"]');
+    expect(filteredItems).toHaveLength(1);
+    expect(filteredItems[0]!.text()).toContain('backend');
+    expect(firstCard.findAll('.picker-active-pill').map((p) => p.text())).toEqual(['bug']);
+
+    // Click backend -> posts ['bug', 'backend'] and updates both card pills and Active labels strip
+    await filteredItems[0]!.trigger('click');
+    await flushPromises();
+    expect(postCalls[0]).toEqual({
+      url: '/api/pull/acme/core-api/101/labels',
+      body: { labels: ['bug', 'backend'] },
+    });
+    expect(firstCard.findAll('.pr-labels-row .pr-label-pill').map((p) => p.text())).toEqual([
+      'backend',
+      'bug',
+    ]);
+    expect(firstCard.findAll('.picker-active-pill').map((p) => p.text())).toEqual([
+      'backend',
+      'bug',
+    ]);
+
+    // Click Active label pill for "bug" -> removes it via POST
+    await firstCard.find('button[aria-label="Remove label bug"]').trigger('click');
+    await flushPromises();
+    expect(postCalls[1]).toEqual({
+      url: '/api/pull/acme/core-api/101/labels',
+      body: { labels: ['backend'] },
+    });
+    expect(firstCard.findAll('.pr-labels-row .pr-label-pill').map((p) => p.text())).toEqual([
+      'backend',
+    ]);
+    expect(firstCard.findAll('.picker-active-pill').map((p) => p.text())).toEqual(['backend']);
+
+    // Searching by label name in main dashboard search matches #101
+    await wrapper.find('#pr-search').setValue('backend');
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
+
+    wrapper.unmount();
+  });
+
+  it('groups PR inspector checks into expandable suite sections with status counts and Expand/Collapse all', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/pull/acme/core-api/101') {
+        return new Response(
+          JSON.stringify({
+            key: 'acme/core-api#101',
+            bodyExcerpt: null,
+            checksTotalCount: 6,
+            checks: [
+              {
+                name: 'Vercel – preview',
+                kind: 'StatusContext',
+                status: 'SUCCESS',
+                conclusion: 'SUCCESS',
+                bucket: 'passing',
+                url: 'https://vercel.test/preview',
+                description: null,
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                name: 'Vercel – staging',
+                kind: 'StatusContext',
+                status: 'SUCCESS',
+                conclusion: 'SUCCESS',
+                bucket: 'passing',
+                url: 'https://vercel.test/staging',
+                description: null,
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                name: 'coverage (2)',
+                kind: 'CheckRun',
+                status: 'COMPLETED',
+                conclusion: 'FAILURE',
+                bucket: 'failing',
+                url: 'https://ci.test/cov-2',
+                description: null,
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                name: 'coverage (1)',
+                kind: 'CheckRun',
+                status: 'IN_PROGRESS',
+                conclusion: null,
+                bucket: 'pending',
+                url: 'https://ci.test/cov-1',
+                description: null,
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                name: 'owned-elements',
+                kind: 'CheckRun',
+                status: 'IN_PROGRESS',
+                conclusion: null,
+                bucket: 'pending',
+                url: 'https://ci.test/owned',
+                description: null,
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                name: 'cancel-previous',
+                kind: 'CheckRun',
+                status: 'COMPLETED',
+                conclusion: 'SUCCESS',
+                bucket: 'passing',
+                url: 'https://ci.test/cancel',
+                description: null,
+                startedAt: null,
+                completedAt: null,
+              },
+            ],
+            reviewers: [],
+            timeline: [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify(makeSnapshot()), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"chk-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Open inspector for #101
+    await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+    await flushPromises();
+
+    const groups = wrapper.findAll('.check-group');
+    expect(groups).toHaveLength(3);
+    expect(groups.map((g) => g.find('.check-group-label').text())).toEqual([
+      'coverage',
+      'Other',
+      'Vercel',
+    ]);
+
+    // coverage (failing) and Other (pending) are expanded; Vercel (all passing) is collapsed
+    expect(groups[0]!.attributes('open')).toBeDefined();
+    expect(groups[1]!.attributes('open')).toBeDefined();
+    expect(groups[2]!.attributes('open')).toBeUndefined();
+
+    // Status counts render on summaries
+    expect(groups[0]!.find('.check-group-counts').text()).toContain('1 fail');
+    expect(groups[0]!.find('.check-group-counts').text()).toContain('1 pend');
+    expect(groups[2]!.find('.check-group-counts').text()).toContain('2 pass');
+
+    // Expand all opens every group, then Collapse all closes every group
+    const toggleAllBtn = wrapper.find('.checks-toggle-all-btn');
+    expect(toggleAllBtn.text()).toBe('Expand all');
+    expect(toggleAllBtn.attributes('aria-expanded')).toBe('false');
+
+    await toggleAllBtn.trigger('click');
+    expect(toggleAllBtn.text()).toBe('Collapse all');
+    expect(toggleAllBtn.attributes('aria-expanded')).toBe('true');
+    for (const g of wrapper.findAll('.check-group')) {
+      expect(g.attributes('open')).toBeDefined();
+    }
+
+    await toggleAllBtn.trigger('click');
+    expect(toggleAllBtn.text()).toBe('Expand all');
+    expect(toggleAllBtn.attributes('aria-expanded')).toBe('false');
+    for (const g of wrapper.findAll('.check-group')) {
+      expect(g.attributes('open')).toBeUndefined();
+    }
 
     wrapper.unmount();
   });

@@ -3,10 +3,13 @@ import type {
   MergeMethod,
   MergePullResponse,
   PrDetailResponse,
+  PrLabel,
   PrView,
+  RepoLabelsResponse,
   SnapshotResponse,
   ToggleDraftResponse,
   UpdateBranchResponse,
+  UpdateLabelsResponse,
 } from '@/types/pr';
 
 export type ClientUiState = 'initializing' | 'live' | 'refreshing' | 'offline';
@@ -57,6 +60,54 @@ export type PrMergeEvent =
   | { type: 'RESET' };
 
 export const IDLE_PR_MERGE_STATE: PrMergeState = { status: 'idle' };
+
+export type RepoLabelsState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; labels: PrLabel[]; fetchedAtMs: number }
+  | { status: 'error'; error: string };
+
+export const IDLE_REPO_LABELS_STATE: RepoLabelsState = { status: 'idle' };
+
+export type PrLabelsState =
+  | { status: 'idle' }
+  | { status: 'saving'; pendingLabels: string[] }
+  | { status: 'error'; error: string };
+
+export type PrLabelsEvent =
+  | { type: 'SAVE_REQUEST'; pendingLabels: string[] }
+  | { type: 'SAVE_SUCCEEDED' }
+  | { type: 'SAVE_FAILED'; error: string }
+  | { type: 'RESET' };
+
+export const IDLE_PR_LABELS_STATE: PrLabelsState = { status: 'idle' };
+
+export function transitionPrLabelsState(
+  current: PrLabelsState,
+  event: PrLabelsEvent,
+): PrLabelsState {
+  if (event.type === 'RESET') {
+    return IDLE_PR_LABELS_STATE;
+  }
+  switch (current.status) {
+    case 'idle':
+    case 'error':
+      if (event.type === 'SAVE_REQUEST') {
+        return { status: 'saving', pendingLabels: event.pendingLabels };
+      }
+      return current;
+    case 'saving':
+      if (event.type === 'SAVE_SUCCEEDED') {
+        return IDLE_PR_LABELS_STATE;
+      }
+      if (event.type === 'SAVE_FAILED') {
+        return { status: 'error', error: event.error };
+      }
+      return current;
+  }
+}
+
+const REPO_LABELS_TTL_MS = 5 * 60 * 1000;
 
 export function transitionPrMergeState(current: PrMergeState, event: PrMergeEvent): PrMergeState {
   if (event.type === 'RESET') {
@@ -160,6 +211,8 @@ export function useDashboardState(
   const syncStates = ref<Record<string, PrSyncState>>({});
   const draftStates = ref<Record<string, PrDraftState>>({});
   const mergeStates = ref<Record<string, PrMergeState>>({});
+  const repoLabelsStates = ref<Record<string, RepoLabelsState>>({});
+  const labelStates = ref<Record<string, PrLabelsState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -285,6 +338,132 @@ export function useDashboardState(
 
     if (changed) {
       mergeStates.value = nextMap;
+    }
+  }
+
+  function getLabelState(prKey: string): PrLabelsState {
+    return labelStates.value[prKey] ?? IDLE_PR_LABELS_STATE;
+  }
+
+  function setLabelState(prKey: string, next: PrLabelsState): void {
+    if (next.status === 'idle') {
+      if (!(prKey in labelStates.value)) {
+        return;
+      }
+      const copy = { ...labelStates.value };
+      delete copy[prKey];
+      labelStates.value = copy;
+      return;
+    }
+    labelStates.value = {
+      ...labelStates.value,
+      [prKey]: next,
+    };
+  }
+
+  async function loadRepoLabels(owner: string, repo: string, force = false): Promise<void> {
+    const repoKey = `${owner}/${repo}`;
+    const existing = repoLabelsStates.value[repoKey] ?? IDLE_REPO_LABELS_STATE;
+    if (existing.status === 'loading') {
+      return;
+    }
+    if (
+      !force &&
+      existing.status === 'ready' &&
+      Date.now() - existing.fetchedAtMs < REPO_LABELS_TTL_MS
+    ) {
+      return;
+    }
+
+    repoLabelsStates.value = {
+      ...repoLabelsStates.value,
+      [repoKey]: { status: 'loading' },
+    };
+
+    try {
+      const response = await fetchFn(
+        `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/labels`,
+        { headers: { Accept: 'application/json' } },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to load labels (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as RepoLabelsResponse;
+      repoLabelsStates.value = {
+        ...repoLabelsStates.value,
+        [repoKey]: { status: 'ready', labels: data.labels, fetchedAtMs: Date.now() },
+      };
+    } catch (error) {
+      repoLabelsStates.value = {
+        ...repoLabelsStates.value,
+        [repoKey]: {
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Failed to load repository labels',
+        },
+      };
+    }
+  }
+
+  async function updatePullLabels(pr: PrView, nextLabels: string[]): Promise<boolean> {
+    const current = getLabelState(pr.key);
+    if (current.status === 'saving') {
+      return false;
+    }
+
+    setLabelState(
+      pr.key,
+      transitionPrLabelsState(current, { type: 'SAVE_REQUEST', pendingLabels: nextLabels }),
+    );
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/labels`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ labels: nextLabels }),
+        },
+      );
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to update labels (HTTP ${response.status})`);
+      }
+
+      const data = (await response.json()) as UpdateLabelsResponse;
+      setLabelState(
+        pr.key,
+        transitionPrLabelsState(getLabelState(pr.key), { type: 'SAVE_SUCCEEDED' }),
+      );
+
+      if (snapshot.value) {
+        snapshot.value = {
+          ...snapshot.value,
+          pullRequests: snapshot.value.pullRequests.map((item) =>
+            item.key === pr.key ? { ...item, labels: data.labels } : item,
+          ),
+        };
+      }
+
+      announcement.value = `Updated labels on ${pr.key}.`;
+      if (fetchInFlight) {
+        pendingRefreshAfterSync = true;
+      } else {
+        void fetchSnapshot(false);
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update labels';
+      setLabelState(
+        pr.key,
+        transitionPrLabelsState(getLabelState(pr.key), { type: 'SAVE_FAILED', error: message }),
+      );
+      announcement.value = `Failed to update labels on ${pr.key}: ${message}`;
+      return false;
     }
   }
 
@@ -741,10 +920,14 @@ export function useDashboardState(
     syncStates,
     draftStates,
     mergeStates,
+    repoLabelsStates,
+    labelStates,
     fetchSnapshot,
     syncPullRequest,
     togglePullDraft,
     mergePullRequest,
+    loadRepoLabels,
+    updatePullLabels,
     openInspector,
     closeInspector,
     setPollIntervalMs,

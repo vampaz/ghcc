@@ -48,6 +48,12 @@ export interface PrMergeQueueInfo {
   estimatedTimeToMerge: number | null;
 }
 
+export interface PrLabel {
+  name: string;
+  color: string;
+  description: string | null;
+}
+
 export interface PrView {
   key: string;
   owner: string;
@@ -61,6 +67,7 @@ export interface PrView {
   headRefName: string;
   headRefOid: string;
   isDraft: boolean;
+  labels: PrLabel[];
   sources: PrSource[];
   bucket: Bucket;
   myAction: MyAction;
@@ -212,4 +219,14 @@ export interface MergePullResponse {
   sha: string;
   message: string;
   mergeMethod: MergeMethod;
+}
+
+export interface RepoLabelsResponse {
+  repository: string;
+  labels: PrLabel[];
+}
+
+export interface UpdateLabelsResponse {
+  ok: true;
+  labels: PrLabel[];
 }
