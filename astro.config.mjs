@@ -41,12 +41,7 @@ export default defineConfig({
   adapter: node({ mode: 'standalone' }),
   integrations: [vue(), ghccBootCheckIntegration()],
   security: {
-    allowedDomains: [
-      { hostname: '127.0.0.1' },
-      { hostname: 'localhost' },
-      { hostname: 'cloud.local' },
-      ...extraAllowedDomains,
-    ],
+    allowedDomains: [{ hostname: '127.0.0.1' }, { hostname: 'localhost' }, ...extraAllowedDomains],
   },
   server: {
     host,

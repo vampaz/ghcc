@@ -6,6 +6,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 FROM deps AS build
+ARG GHCC_ALLOWED_HOSTS
 COPY . .
 RUN npm run build
 

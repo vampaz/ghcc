@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository instructions for `ghcc`, a local-only, read-only pull request dashboard built with Astro 7 SSR (`@astrojs/node` standalone) and Vue 3.
+Repository instructions for `ghcc`, a local and self-hosted pull request dashboard built with Astro 7 SSR (`@astrojs/node` standalone) and Vue 3.
 
 ## Runtime Prerequisites
 
@@ -11,7 +11,7 @@ Repository instructions for `ghcc`, a local-only, read-only pull request dashboa
 
 Do not run the bare-metal server and Docker container on port `4321` at the same time. Stop the running instance first or set `PORT` to a different port.
 
-### Docker (Mac / OrbStack or `cloud.local` Ubuntu server)
+### Docker
 
 Build and start in the background, waiting for `/api/health`:
 
@@ -19,8 +19,8 @@ Build and start in the background, waiting for `/api/health`:
 GH_TOKEN="$(gh auth token)" docker compose up -d --build --wait
 ```
 
-- **Mac (OrbStack)**: open `http://127.0.0.1:4321` or `http://localhost:4321`. Pass `GHCC_BIND_HOST=127.0.0.1` to restrict host port publishing to loopback.
-- **`cloud.local` (Ubuntu server)**: open `http://cloud.local:4321` (or put a reverse proxy in front of port `4321`). For restarts across reboots, store `GH_TOKEN` in an untracked `chmod 600 .env` file next to `compose.yaml` or mount a read-only secret file and set `GH_TOKEN_FILE`.
+- **Local machine**: open `http://127.0.0.1:4321` or `http://localhost:4321`. Pass `GHCC_BIND_HOST=127.0.0.1` to restrict host port publishing to loopback.
+- **LAN server / remote host**: open `http://<host>:4321` (or put a reverse proxy in front of port `4321`). For restarts across reboots, store `GH_TOKEN` in an untracked `chmod 600 .env` file next to `compose.yaml` or mount a read-only secret file and set `GH_TOKEN_FILE`.
 - **Container lifecycle**:
   - Status: `docker compose ps`
   - Logs: `docker compose logs -f`
@@ -53,7 +53,7 @@ npm run start
 - **Resolution order** (`src/server/boot-check.mjs`): `GH_TOKEN_FILE` -> `GH_TOKEN` -> `GITHUB_TOKEN` -> `gh auth status` + `gh auth token`.
 - **Fail-closed boot**: startup verifies the credential against GitHub GraphQL (`viewer { login }`) and exits non-zero if missing or rejected.
 - **Secrets hygiene**: never print, log, serialize, or commit GitHub tokens or `.env` files.
-- **Same-origin refresh protection** (`src/pages/api/refresh.ts` and `astro.config.mjs`): `POST /api/refresh` only accepts loopback hosts (`127.0.0.1`, `localhost`, `::1`) plus comma-separated hostnames in `GHCC_ALLOWED_HOSTS` (`compose.yaml` defaults to `cloud.local`). Update both `GHCC_ALLOWED_HOSTS` and `astro.config.mjs` `security.allowedDomains` if exposing another hostname directly.
+- **Same-origin `POST` protection** (`src/server/origin-guard.ts` and `astro.config.mjs`): Same-origin `POST` endpoints (`/api/refresh`, `/api/pull/.../update-branch`, `/api/pull/.../draft`) work on any host by default as long as `Sec-Fetch-Site` and `Origin` match `Host`/`X-Forwarded-Host`. Optionally set comma-separated hostnames in `GHCC_ALLOWED_HOSTS` (also passed as a Docker build arg into `astro.config.mjs` `security.allowedDomains`) to restrict `POST` requests to loopback plus an explicit allowlist.
 
 ## Validation Checks
 

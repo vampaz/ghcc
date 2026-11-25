@@ -1,17 +1,20 @@
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
-function getAllowedHosts(env: Record<string, string | undefined> = process.env): Set<string> {
-  const allowed = new Set(LOOPBACK_HOSTS);
+function getConfiguredAllowedHosts(
+  env: Record<string, string | undefined> = process.env,
+): Set<string> | null {
   const configured = env.GHCC_ALLOWED_HOSTS;
-  if (configured) {
-    for (const entry of configured.split(',')) {
-      const normalized = entry.trim().toLowerCase();
-      if (normalized) {
-        allowed.add(normalized);
-      }
-    }
+  if (!configured) {
+    return null;
   }
-  return allowed;
+  const entries = configured
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  if (entries.length === 0) {
+    return null;
+  }
+  return new Set([...LOOPBACK_HOSTS, ...entries]);
 }
 
 function normalizeHostForProtocol(
@@ -57,10 +60,10 @@ export function isAllowedSameOriginPost(
       return false;
     }
 
-    const allowedHosts = getAllowedHosts(env);
+    const allowedHosts = getConfiguredAllowedHosts(env);
     if (
       (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') ||
-      !allowedHosts.has(originUrl.hostname.toLowerCase())
+      (allowedHosts !== null && !allowedHosts.has(originUrl.hostname.toLowerCase()))
     ) {
       return false;
     }

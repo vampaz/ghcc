@@ -263,7 +263,10 @@ export function useDashboardState(
       if (force) {
         response = await fetchFn('/api/refresh', {
           method: 'POST',
-          headers: { Accept: 'application/json' },
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
         });
         if (response.status === 429) {
           const errBody = (await response.json().catch(() => ({}))) as {

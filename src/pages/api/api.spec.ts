@@ -356,50 +356,64 @@ describe('API routes (mocked fetch)', () => {
     expect(valid.status).toBe(200);
   });
 
-  it('allows configured GHCC_ALLOWED_HOSTS (such as cloud.local) for same-origin POST /api/refresh', () => {
-    const cloudDirect = new Request('http://cloud.local:4321/api/refresh', {
+  it('allows same-origin POST on any host by default and enforces optional GHCC_ALLOWED_HOSTS allowlist', () => {
+    const lanDirect = new Request('http://pr-box.local:4321/api/refresh', {
       method: 'POST',
       headers: {
         'sec-fetch-site': 'same-origin',
-        origin: 'http://cloud.local:4321',
-        host: 'cloud.local:4321',
+        origin: 'http://pr-box.local:4321',
+        host: 'pr-box.local:4321',
       },
     });
-    expect(isAllowedSameOriginPost(cloudDirect, {})).toBe(false);
-    expect(isAllowedSameOriginPost(cloudDirect, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(true);
+    expect(isAllowedSameOriginPost(lanDirect, {})).toBe(true);
+    expect(isAllowedSameOriginPost(lanDirect, { GHCC_ALLOWED_HOSTS: 'pr-box.local' })).toBe(true);
 
-    const cloudProxiedHttps = new Request('http://127.0.0.1:4321/api/refresh', {
+    const proxiedHttps = new Request('http://127.0.0.1:4321/api/refresh', {
       method: 'POST',
       headers: {
         'sec-fetch-site': 'same-origin',
-        origin: 'https://cloud.local',
+        origin: 'https://dashboard.example',
         host: 'ghcc:4321',
-        'x-forwarded-host': 'cloud.local:443',
+        'x-forwarded-host': 'dashboard.example:443',
       },
     });
-    expect(isAllowedSameOriginPost(cloudProxiedHttps, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(
+    expect(isAllowedSameOriginPost(proxiedHttps, {})).toBe(true);
+    expect(isAllowedSameOriginPost(proxiedHttps, { GHCC_ALLOWED_HOSTS: 'dashboard.example' })).toBe(
       true,
     );
 
-    const wrongPort = new Request('http://cloud.local:4321/api/refresh', {
+    const wrongPort = new Request('http://pr-box.local:4321/api/refresh', {
       method: 'POST',
       headers: {
         'sec-fetch-site': 'same-origin',
-        origin: 'http://cloud.local:9999',
-        host: 'cloud.local:4321',
+        origin: 'http://pr-box.local:9999',
+        host: 'pr-box.local:4321',
       },
     });
-    expect(isAllowedSameOriginPost(wrongPort, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(false);
+    expect(isAllowedSameOriginPost(wrongPort, {})).toBe(false);
+    expect(isAllowedSameOriginPost(wrongPort, { GHCC_ALLOWED_HOSTS: 'pr-box.local' })).toBe(false);
 
-    const evilHost = new Request('http://evil.example:4321/api/refresh', {
+    const mismatchedOrigin = new Request('http://pr-box.local:4321/api/refresh', {
       method: 'POST',
       headers: {
         'sec-fetch-site': 'same-origin',
         origin: 'http://evil.example:4321',
-        host: 'evil.example:4321',
+        host: 'pr-box.local:4321',
       },
     });
-    expect(isAllowedSameOriginPost(evilHost, { GHCC_ALLOWED_HOSTS: 'cloud.local' })).toBe(false);
+    expect(isAllowedSameOriginPost(mismatchedOrigin, {})).toBe(false);
+
+    const unlistedHost = new Request('http://other.example:4321/api/refresh', {
+      method: 'POST',
+      headers: {
+        'sec-fetch-site': 'same-origin',
+        origin: 'http://other.example:4321',
+        host: 'other.example:4321',
+      },
+    });
+    expect(isAllowedSameOriginPost(unlistedHost, { GHCC_ALLOWED_HOSTS: 'pr-box.local' })).toBe(
+      false,
+    );
   });
 
   it('rejects invalid owner/repo/number segments on /api/pull without calling fetch', async () => {
