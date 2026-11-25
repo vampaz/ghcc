@@ -1,7 +1,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import type { Bucket } from '@/types/pr';
 
-export type ViewFilter = 'all' | 'mine' | 'review';
+export type ViewFilter = 'all' | 'mine' | 'review' | 'team';
 export type BucketFilter = Bucket | 'ci-failing' | '';
 
 export interface DashboardFilters {
@@ -12,7 +12,7 @@ export interface DashboardFilters {
   drafts: boolean;
 }
 
-const VALID_VIEWS = new Set<ViewFilter>(['all', 'mine', 'review']);
+const VALID_VIEWS = new Set<ViewFilter>(['all', 'mine', 'review', 'team']);
 const VALID_BUCKETS = new Set<BucketFilter>([
   '',
   'needs-me',

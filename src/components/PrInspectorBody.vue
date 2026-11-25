@@ -9,6 +9,33 @@
         <span class="meta-sep">·</span>
         <span>by @{{ pr.author }}</span>
       </div>
+
+      <div v-if="showSyncAction" class="sync-callout">
+        <div class="sync-callout-row">
+          <button
+            type="button"
+            class="sync-action-btn"
+            :class="{
+              synced: syncState.status === 'synced',
+              syncing: syncState.status === 'syncing',
+            }"
+            :aria-disabled="isSyncBusy ? 'true' : undefined"
+            :aria-label="syncAriaLabel"
+            @click="onSyncClick"
+          >
+            <progress
+              v-if="syncState.status === 'syncing'"
+              class="loading-spinner"
+              aria-label="Syncing branch"
+            ></progress>
+            <span>{{ syncButtonText }}</span>
+          </button>
+          <span class="sync-hint">Merges {{ pr.baseRefName }} into {{ pr.headRefName }}</span>
+        </div>
+        <p v-if="syncState.status === 'error'" class="sync-error-note" role="alert">
+          {{ syncState.error }}
+        </p>
+      </div>
     </div>
 
     <div v-if="inspector.status === 'loading'" class="state-box">
@@ -98,7 +125,12 @@
 </template>
 
 <script setup lang="ts">
-import type { InspectorState } from '@/composables/use-dashboard-state';
+import { computed } from 'vue';
+import {
+  IDLE_PR_SYNC_STATE,
+  type InspectorState,
+  type PrSyncState,
+} from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
 import { formatRelativeAge } from '@/utils/format';
 
@@ -106,13 +138,51 @@ interface Props {
   pr: PrView | null;
   inspector: InspectorState;
   nowMs: number;
+  syncState?: PrSyncState;
 }
 
-defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  syncState: () => IDLE_PR_SYNC_STATE,
+});
 
-defineEmits<{
+const emit = defineEmits<{
   retry: [pr: PrView];
+  sync: [pr: PrView];
 }>();
+
+const showSyncAction = computed<boolean>(
+  () =>
+    Boolean(props.pr) && (props.pr?.merge.state === 'behind' || props.syncState.status !== 'idle'),
+);
+
+const isSyncBusy = computed<boolean>(
+  () => props.syncState.status === 'syncing' || props.syncState.status === 'synced',
+);
+
+const syncButtonText = computed<string>(() => {
+  const base = props.pr?.baseRefName ?? 'base';
+  if (props.syncState.status === 'syncing') {
+    return `Syncing with ${base}`;
+  }
+  if (props.syncState.status === 'synced') {
+    return `Synced with ${base}`;
+  }
+  return `Sync with ${base}`;
+});
+
+const syncAriaLabel = computed<string>(() => {
+  if (!props.pr) {
+    return syncButtonText.value;
+  }
+  return `${syncButtonText.value} for ${props.pr.key}`;
+});
+
+function onSyncClick(): void {
+  if (!props.pr || isSyncBusy.value) {
+    return;
+  }
+  emit('sync', props.pr);
+}
 </script>
 
 <style scoped>
@@ -144,6 +214,73 @@ defineEmits<{
   gap: 0.35rem;
   font-size: 0.75rem;
   color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.sync-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+}
+
+.sync-callout-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.sync-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sync-action-btn:hover:not([aria-disabled='true']) {
+  background-color: var(--accent-blue);
+  color: #ffffff;
+}
+
+.sync-action-btn.synced {
+  border-color: var(--accent-emerald);
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+}
+
+.sync-action-btn[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.sync-hint {
+  font-size: 0.75rem;
+  color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.sync-error-note {
+  margin: 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.35rem;
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  font-size: 0.78rem;
   overflow-wrap: anywhere;
 }
 

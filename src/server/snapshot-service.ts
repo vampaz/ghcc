@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { TokenStore } from '@/server/auth';
 import {
   computeCounts,
+  isActivePullRequest,
   mergeRawPullRequests,
   normalizePullRequests,
 } from '@/server/derive/normalize';
@@ -19,6 +20,7 @@ import type {
 
 export const SNAPSHOT_TTL_MS = 90_000;
 export const REVIEW_QUEUE_TTL_MS = 90_000;
+export const REPO_PULLS_TTL_MS = 90_000;
 export const MANUAL_REFRESH_COOLDOWN_MS = 10_000;
 export const RATE_LIMIT_BACKOFF_BUFFER_MS = 5_000;
 
@@ -120,6 +122,7 @@ export interface SnapshotServiceDeps {
 export interface SnapshotService {
   getSnapshot(): Promise<SnapshotResult>;
   forceRefresh(): Promise<SnapshotResult>;
+  invalidateCache(): void;
   getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState };
 }
 
@@ -157,6 +160,13 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
 
   let cachedReviewQueue: {
     fetchedAtMs: number;
+    pullRequests: RawPullRequest[];
+    warnings: SnapshotWarning[];
+  } | null = null;
+
+  let cachedRepoPulls: {
+    fetchedAtMs: number;
+    repoKeys: string;
     pullRequests: RawPullRequest[];
     warnings: SnapshotWarning[];
   } | null = null;
@@ -271,7 +281,82 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         }
       }
 
-      const merged = mergeRawPullRequests(authored.pullRequests, reviewPulls);
+      const activeRepos = Array.from(
+        new Set(
+          [...authored.pullRequests, ...reviewPulls]
+            .filter(isActivePullRequest)
+            .map((pr) => pr.repository.nameWithOwner)
+            .filter((name) => name.includes('/')),
+        ),
+      ).sort();
+
+      let repoPulls: RawPullRequest[] = [];
+      let repoPullsFailed = false;
+      const repoKeys = activeRepos.join(',');
+      const canReuseRepoPulls =
+        cachedRepoPulls !== null &&
+        cachedRepoPulls.repoKeys === repoKeys &&
+        startMs - cachedRepoPulls.fetchedAtMs < REPO_PULLS_TTL_MS;
+
+      if (activeRepos.length > 0 && deps.githubClient.fetchRepoPulls) {
+        if (canReuseRepoPulls && cachedRepoPulls) {
+          repoPulls = cachedRepoPulls.pullRequests;
+          warnings.push(...cachedRepoPulls.warnings);
+        } else {
+          const collected: RawPullRequest[] = [];
+          const repoWarnings: SnapshotWarning[] = [];
+          const queue = [...activeRepos];
+          const concurrency = Math.min(2, queue.length);
+
+          async function runWorker(): Promise<void> {
+            while (queue.length > 0) {
+              const fullName = queue.shift();
+              if (!fullName) {
+                continue;
+              }
+              const [owner, repo] = fullName.split('/');
+              if (!owner || !repo) {
+                continue;
+              }
+              try {
+                const res = await deps.githubClient.fetchRepoPulls(owner, repo);
+                if (res.rateLimit) {
+                  lastGraphqlLimit = res.rateLimit;
+                }
+                collected.push(...res.pullRequests);
+                repoWarnings.push(...res.warnings);
+              } catch (err) {
+                if (err instanceof GitHubAuthError || err instanceof GitHubRateLimitError) {
+                  throw err;
+                }
+                repoPullsFailed = true;
+                const msg = sanitizeErrorMessage(err, deps.tokenStore.peekToken());
+                repoWarnings.push({
+                  code: 'repo-pulls-failed',
+                  message: `Repository pull requests unavailable: ${msg}`,
+                });
+              }
+            }
+          }
+
+          await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+
+          repoPulls = collected;
+          warnings.push(...repoWarnings);
+          if (!repoPullsFailed) {
+            cachedRepoPulls = {
+              fetchedAtMs: startMs,
+              repoKeys,
+              pullRequests: collected,
+              warnings: repoWarnings,
+            };
+          } else if (cachedRepoPulls && collected.length === 0) {
+            repoPulls = cachedRepoPulls.pullRequests;
+          }
+        }
+      }
+
+      const merged = mergeRawPullRequests(authored.pullRequests, reviewPulls, repoPulls);
       let probeErrored = false;
 
       const normalized = await normalizePullRequests(merged, {
@@ -310,7 +395,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       }
 
       const uniqueWarnings = dedupeWarnings(warnings);
-      const isDegraded = reviewFailed || uniqueWarnings.length > 0;
+      const isDegraded = reviewFailed || repoPullsFailed || uniqueWarnings.length > 0;
       lifecycle = transitionLifecycleState(
         lifecycle,
         isDegraded ? 'FETCH_PARTIAL' : 'FETCH_OK',
@@ -437,6 +522,12 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
 
       lastManualRefreshAtMs = currentMs;
       return triggerFetch(true);
+    },
+
+    invalidateCache(): void {
+      lastSnapshotAtMs = 0;
+      cachedReviewQueue = null;
+      cachedRepoPulls = null;
     },
 
     getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState } {

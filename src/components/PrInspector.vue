@@ -28,7 +28,9 @@
         :pr="pr"
         :inspector="inspector"
         :now-ms="nowMs"
+        :sync-state="syncState"
         @retry="$emit('retry', $event)"
+        @sync="$emit('sync', $event)"
       />
     </div>
   </dialog>
@@ -46,7 +48,9 @@
       :pr="pr"
       :inspector="inspector"
       :now-ms="nowMs"
+      :sync-state="syncState"
       @retry="$emit('retry', $event)"
+      @sync="$emit('sync', $event)"
     />
   </section>
 </template>
@@ -54,7 +58,11 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import PrInspectorBody from '@/components/PrInspectorBody.vue';
-import type { InspectorState } from '@/composables/use-dashboard-state';
+import {
+  IDLE_PR_SYNC_STATE,
+  type InspectorState,
+  type PrSyncState,
+} from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
 
 interface Props {
@@ -62,13 +70,17 @@ interface Props {
   pr: PrView | null;
   inspector: InspectorState;
   nowMs: number;
+  syncState?: PrSyncState;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  syncState: () => IDLE_PR_SYNC_STATE,
+});
 
 const emit = defineEmits<{
   close: [];
   retry: [pr: PrView];
+  sync: [pr: PrView];
 }>();
 
 const dialogRef = ref<HTMLDialogElement | null>(null);

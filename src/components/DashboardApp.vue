@@ -28,30 +28,31 @@
     />
 
     <main class="dashboard-main">
-      <KpiStrip
-        :pull-requests="allPullRequests"
-        :active-bucket="bucket"
-        :now-ms="nowMs"
-        @select-bucket="onSelectBucket"
-      />
+      <div class="dashboard-controls">
+        <KpiStrip
+          :pull-requests="scopedPulls"
+          :active-bucket="bucket"
+          :now-ms="nowMs"
+          :waiting-includes-team="view === 'team'"
+          @select-bucket="onSelectBucket"
+        />
 
-      <FilterBar
-        ref="filterBarRef"
-        :view="view"
-        :bucket="bucket"
-        :q="q"
-        :repo="repo"
-        :drafts="drafts"
-        :repo-options="repoOptions"
-        :total-count="allPullRequests.length"
-        :draft-count="draftPullRequests.length"
-        @update:view="view = $event"
-        @update:bucket="bucket = $event"
-        @update:q="q = $event"
-        @update:repo="repo = $event"
-        @update:drafts="drafts = $event"
-        @clear="resetFilters"
-      />
+        <FilterBar
+          ref="filterBarRef"
+          :view="view"
+          :bucket="bucket"
+          :q="q"
+          :repo="repo"
+          :drafts="drafts"
+          :draft-count="draftPullRequests.length"
+          @update:view="view = $event"
+          @update:bucket="bucket = $event"
+          @update:q="q = $event"
+          @update:repo="repo = $event"
+          @update:drafts="drafts = $event"
+          @clear="resetFilters"
+        />
+      </div>
 
       <div class="dashboard-grid">
         <ActionQueue
@@ -61,7 +62,9 @@
           :is-loading="clientState === 'initializing' && !snapshot"
           :active-bucket="bucket"
           :has-filters="hasActiveFilters"
+          :sync-states="syncStates"
           @select="onSelectPr"
+          @sync="syncPullRequest"
         >
           <template #inline-inspector="{ pr }">
             <PrInspector
@@ -70,18 +73,23 @@
               :pr="pr"
               :inspector="inspector"
               :now-ms="nowMs"
+              :sync-state="syncStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
+              @sync="syncPullRequest"
             />
           </template>
         </ActionQueue>
 
-        <aside class="context-rail" aria-label="Waiting queue, repositories, and drafts">
+        <aside class="context-rail app-scroll" aria-label="Waiting queue and repositories">
           <WaitingPanel
+            v-if="bucket !== 'waiting' && view !== 'team'"
             :pull-requests="waitingPullRequests"
             :selected-key="activeKey"
             :now-ms="nowMs"
+            :sync-states="syncStates"
             @select="onSelectPr"
+            @sync="syncPullRequest"
           >
             <template #inline-inspector="{ pr }">
               <PrInspector
@@ -90,8 +98,10 @@
                 :pr="pr"
                 :inspector="inspector"
                 :now-ms="nowMs"
+                :sync-state="syncStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
+                @sync="syncPullRequest"
               />
             </template>
           </WaitingPanel>
@@ -99,32 +109,28 @@
           <RepoBreakdown
             :pull-requests="ownershipFilteredPulls"
             :active-repo="repo"
+            :include-drafts="drafts"
             @select-repo="repo = $event"
           />
-
-          <DraftsPanel
-            :pull-requests="draftPullRequests"
-            :expanded="drafts"
-            :selected-key="activeKey"
-            :now-ms="nowMs"
-            @toggle="drafts = !drafts"
-            @select="onSelectPr"
-          >
-            <template #inline-inspector="{ pr }">
-              <PrInspector
-                v-if="!isDesktop && inspector.key === pr.key"
-                mode="inline"
-                :pr="pr"
-                :inspector="inspector"
-                :now-ms="nowMs"
-                @close="closeInspector"
-                @retry="openInspector"
-              />
-            </template>
-          </DraftsPanel>
         </aside>
       </div>
     </main>
+
+    <footer class="app-footer">
+      <div class="app-footer-inner">
+        <div class="shortcut-bar" aria-label="Keyboard shortcuts">
+          <span><kbd>j</kbd>/<kbd>k</kbd> navigate</span>
+          <span><kbd>Enter</kbd> inspect</span>
+          <span><kbd>o</kbd> open on GitHub</span>
+          <span><kbd>/</kbd> search</span>
+          <span><kbd>r</kbd> refresh</span>
+          <span><kbd>Esc</kbd> close / clear</span>
+        </div>
+        <span class="footer-summary mono-num">
+          {{ primaryQueuePulls.length }} shown · {{ allPullRequests.length }} open
+        </span>
+      </div>
+    </footer>
 
     <PrInspector
       v-if="isDesktop"
@@ -132,8 +138,10 @@
       :pr="selectedPr"
       :inspector="inspector"
       :now-ms="nowMs"
+      :sync-state="selectedPr ? syncStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
+      @sync="syncPullRequest"
     />
 
     <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -146,7 +154,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import ActionQueue from '@/components/ActionQueue.vue';
 import AppHeader from '@/components/AppHeader.vue';
-import DraftsPanel from '@/components/DraftsPanel.vue';
 import FilterBar from '@/components/FilterBar.vue';
 import KpiStrip from '@/components/KpiStrip.vue';
 import PrInspector from '@/components/PrInspector.vue';
@@ -168,7 +175,9 @@ const {
   refreshCooldownNotice,
   announcement,
   inspector,
+  syncStates,
   fetchSnapshot,
+  syncPullRequest,
   openInspector,
   closeInspector,
   setPollIntervalMs,
@@ -190,7 +199,14 @@ function matchesOwnership(pr: PrView): boolean {
   if (view.value === 'review') {
     return pr.sources.includes('review-requested');
   }
+  if (view.value === 'team') {
+    return !pr.sources.includes('authored');
+  }
   return true;
+}
+
+function isTeamOnlyPr(pr: PrView): boolean {
+  return !pr.sources.includes('authored') && !pr.sources.includes('review-requested');
 }
 
 function matchesSearchAndRepo(pr: PrView): boolean {
@@ -218,34 +234,37 @@ const filteredBasePulls = computed<PrView[]>(() =>
   ownershipFilteredPulls.value.filter(matchesSearchAndRepo),
 );
 
-const repoOptions = computed(() => {
-  const counts = new Map<string, number>();
-  for (const pr of ownershipFilteredPulls.value) {
-    counts.set(pr.repository, (counts.get(pr.repository) ?? 0) + 1);
-  }
-  return Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([name, count]) => ({ name, count }));
-});
+const scopedPulls = computed<PrView[]>(() =>
+  drafts.value
+    ? filteredBasePulls.value
+    : filteredBasePulls.value.filter((pr) => pr.bucket !== 'draft'),
+);
 
 const primaryQueuePulls = computed<PrView[]>(() => {
-  const base = filteredBasePulls.value;
   if (bucket.value === 'ci-failing') {
-    return base.filter((pr) => pr.ci.state === 'failing');
+    return scopedPulls.value.filter((pr) => pr.ci.state === 'failing');
+  }
+  if (bucket.value === 'waiting') {
+    return filteredBasePulls.value.filter(
+      (pr) => pr.bucket === 'waiting' && (view.value === 'team' || pr.sources.includes('authored')),
+    );
   }
   if (bucket.value) {
-    return base.filter((pr) => pr.bucket === bucket.value);
+    return filteredBasePulls.value.filter((pr) => pr.bucket === bucket.value);
   }
-  return base.filter((pr) => {
-    if (pr.bucket === 'needs-me' || pr.bucket === 'ready') {
-      return true;
-    }
-    return drafts.value && pr.bucket === 'draft';
-  });
+  return scopedPulls.value.filter(
+    (pr) =>
+      pr.bucket === 'needs-me' ||
+      pr.bucket === 'ready' ||
+      pr.bucket === 'draft' ||
+      (pr.bucket === 'waiting' && isTeamOnlyPr(pr)),
+  );
 });
 
 const waitingPullRequests = computed<PrView[]>(() =>
-  filteredBasePulls.value.filter((pr) => pr.bucket === 'waiting'),
+  filteredBasePulls.value.filter(
+    (pr) => pr.bucket === 'waiting' && pr.sources.includes('authored'),
+  ),
 );
 
 const draftPullRequests = computed<PrView[]>(() =>
@@ -412,44 +431,143 @@ onUnmounted(() => {
 
 <style scoped>
 .dashboard-shell {
-  min-height: 100dvh;
+  block-size: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: clip;
+}
+
+.dashboard-shell > :deep(header),
+.dashboard-shell > :deep(.warning-strip),
+.app-footer {
+  flex: 0 0 auto;
 }
 
 .dashboard-main {
-  width: 100%;
-  max-width: 90rem;
-  margin: 0 auto;
-  padding: 1rem 1.25rem 2.5rem;
+  flex: 1 1 auto;
+  min-block-size: 0;
+  inline-size: 100%;
+  max-inline-size: 90rem;
+  margin-inline: auto;
+  padding: 0.875rem 1.25rem 0;
   display: flex;
   flex-direction: column;
   gap: 0.875rem;
+  overflow: clip;
+}
+
+.dashboard-controls {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
 .dashboard-grid {
+  flex: 1 1 auto;
+  min-block-size: 0;
   display: grid;
   grid-template-columns: minmax(0, 1.85fr) minmax(18rem, 1fr);
-  align-items: start;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
   gap: 1rem;
+  overflow: clip;
 }
 
 .context-rail {
   display: flex;
   flex-direction: column;
   gap: 0.875rem;
-  min-width: 0;
+  min-inline-size: 0;
+  min-block-size: 0;
+  padding-block-end: 0.75rem;
+  padding-inline-end: 0.25rem;
+}
+
+.app-footer {
+  border-top: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  padding: 0.5rem 1.25rem;
+}
+
+.app-footer-inner {
+  inline-size: 100%;
+  max-inline-size: 90rem;
+  margin-inline: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem 1rem;
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+}
+
+.shortcut-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 1rem;
+}
+
+.shortcut-bar kbd {
+  padding: 0.05rem 0.32rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.footer-summary {
+  margin-inline-start: auto;
+  color: var(--ink-secondary);
+  font-size: 0.75rem;
 }
 
 @media (max-width: 1023px) {
   .dashboard-grid {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-block-end: 0.75rem;
+  }
+
+  .context-rail {
+    overflow: visible;
+    scrollbar-gutter: auto;
+    padding-block-end: 0;
+    padding-inline-end: 0;
   }
 }
 
-@media (max-width: 639px) {
+@media (max-width: 767px) {
   .dashboard-main {
-    padding: 0.75rem 0.875rem 2rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.75rem 0.875rem 1rem;
+  }
+
+  .dashboard-grid {
+    flex: 0 0 auto;
+    overflow: visible;
+    padding-block-end: 0;
+  }
+
+  .app-footer {
+    padding: 0.45rem 0.875rem;
+  }
+
+  .shortcut-bar {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .shortcut-bar {
+    display: none;
   }
 }
 </style>

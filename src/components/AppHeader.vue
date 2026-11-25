@@ -22,7 +22,12 @@
     </div>
 
     <div class="header-right">
-      <div class="rate-gauges" aria-label="GitHub API rate limits">
+      <div
+        v-if="rateLimit?.graphql || rateLimit?.core"
+        class="rate-gauges"
+        :class="{ 'is-low': isRateLimitLow }"
+        aria-label="GitHub API rate limits"
+      >
         <span
           v-if="rateLimit?.graphql"
           class="rate-chip mono-num"
@@ -66,9 +71,9 @@
       <button
         type="button"
         class="header-btn refresh-btn"
-        :disabled="clientState === 'refreshing'"
+        :aria-disabled="clientState === 'refreshing' ? 'true' : undefined"
         aria-keyshortcuts="r"
-        @click="$emit('refresh')"
+        @click="onRefreshClick"
       >
         <span
           class="refresh-glyph"
@@ -131,6 +136,11 @@ const statusTone = computed<'ok' | 'warn' | 'err'>(() => {
   return 'ok';
 });
 
+const isRateLimitLow = computed<boolean>(() => {
+  const buckets = [props.rateLimit?.graphql, props.rateLimit?.core];
+  return buckets.some((b) => b && b.limit > 0 && b.remaining / b.limit < 0.2);
+});
+
 const themeButtonLabel = computed<string>(() => {
   return props.resolvedTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
 });
@@ -138,6 +148,13 @@ const themeButtonLabel = computed<string>(() => {
 function onPollChange(event: Event): void {
   const target = event.target as HTMLSelectElement;
   emit('updatePollInterval', Number(target.value));
+}
+
+function onRefreshClick(): void {
+  if (props.clientState === 'refreshing') {
+    return;
+  }
+  emit('refresh');
 }
 </script>
 
@@ -251,14 +268,20 @@ function onPollChange(event: Event): void {
   cursor: pointer;
 }
 
-.header-btn:hover:not(:disabled),
+.header-btn:hover:not([aria-disabled='true']),
 .header-select:hover {
   background-color: var(--bg-surface-hover);
 }
 
-.header-btn:disabled {
+.header-btn[aria-disabled='true'] {
   opacity: 0.6;
   cursor: wait;
+}
+
+.rate-gauges.is-low .rate-chip {
+  border-color: var(--accent-amber);
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
 }
 
 .refresh-glyph.spinning {
@@ -284,6 +307,14 @@ function onPollChange(event: Event): void {
 @media (max-width: 639px) {
   .app-header {
     padding: 0.625rem 0.875rem;
+    gap: 0.5rem 0.75rem;
+  }
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .rate-gauges:not(.is-low) {
+    display: none;
   }
   .btn-label {
     display: none;

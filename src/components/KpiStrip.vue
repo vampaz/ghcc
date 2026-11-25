@@ -81,10 +81,12 @@ interface Props {
   pullRequests: PrView[];
   activeBucket: BucketFilter;
   nowMs?: number;
+  waitingIncludesTeam?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   nowMs: () => Date.now(),
+  waitingIncludesTeam: false,
 });
 
 defineEmits<{
@@ -115,7 +117,10 @@ const readyCount = computed<number>(
 );
 
 const waitingPrs = computed<PrView[]>(() =>
-  props.pullRequests.filter((pr) => pr.bucket === 'waiting'),
+  props.pullRequests.filter(
+    (pr) =>
+      pr.bucket === 'waiting' && (props.waitingIncludesTeam || pr.sources.includes('authored')),
+  ),
 );
 
 const waitingCount = computed<number>(() => waitingPrs.value.length);

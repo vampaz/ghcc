@@ -96,6 +96,8 @@ function labelFor(code: WarningCode): string {
       return 'SSO Required';
     case 'review-queue-failed':
       return 'Partial Data';
+    case 'repo-pulls-failed':
+      return 'Partial Repos';
     case 'rate-limited':
       return 'Rate Limited';
     case 'auth-error':

@@ -11,7 +11,7 @@ export type BlockerCode =
   | 'blocked-unknown'
   | 'queue-waiting';
 
-export type PrSource = 'authored' | 'review-requested';
+export type PrSource = 'authored' | 'review-requested' | 'repo';
 
 export type MyAction = 'review' | 'merge' | 'fix-ci' | 'rebase' | 'ping' | 'none';
 
@@ -98,6 +98,7 @@ export type SchedulerState = 'idle' | 'scheduled' | 'in-flight' | 'backing-off';
 
 export type WarningCode =
   | 'review-queue-failed'
+  | 'repo-pulls-failed'
   | 'sso-required'
   | 'graphql-partial-error'
   | 'mergeability-cached'
@@ -190,4 +191,10 @@ export interface HealthResponse {
   gh: 'ok' | 'error';
   login: string;
   tokenSource: 'gh-cli' | 'env';
+}
+
+export interface UpdateBranchResponse {
+  ok: true;
+  message: string;
+  url?: string;
 }

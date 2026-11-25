@@ -69,6 +69,7 @@ docker compose down
 - `GET /api/snapshot` — returns normalized pull request buckets, counts, rate limits, and warnings (supports `ETag` / `304`)
 - `POST /api/refresh` — forces a snapshot refresh (same-origin protected, 10s cooldown)
 - `GET /api/pull/{owner}/{repo}/{number}` — loads full checks, reviewers, and last 5 timeline items for the inspector
+- `POST /api/pull/{owner}/{repo}/{number}/update-branch` — merges the base branch into a behind pull request branch via GitHub's update-branch API (same-origin protected)
 
 ## Checks
 

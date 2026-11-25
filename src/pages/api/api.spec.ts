@@ -6,6 +6,7 @@ import type { APIContext } from 'astro';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getHealth } from '@/pages/api/health';
 import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
+import { POST as postUpdateBranch } from '@/pages/api/pull/[owner]/[repo]/[number]/update-branch';
 import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
 import { GET as getSnapshot } from '@/pages/api/snapshot';
 import type { TokenStore } from '@/server/auth';
@@ -218,7 +219,16 @@ describe('API routes (mocked fetch)', () => {
           },
         });
       }
-      return new Response(`Search backend failure for ${TEST_SECRET}`, { status: 502 });
+      if (parsed.query?.includes('query ReviewQueue')) {
+        return new Response(`Search backend failure for ${TEST_SECRET}`, { status: 502 });
+      }
+      return jsonResponse({
+        data: {
+          repository: {
+            pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+          },
+        },
+      });
     });
 
     await setupRuntime(fetchFn);
@@ -453,5 +463,142 @@ describe('API routes (mocked fetch)', () => {
     expect(body.pullRequests.map((p) => p.key)).toEqual(['acme/docs#202']);
     expect(body.counts.ready).toBe(1);
     expect(body.counts.waiting).toBe(0);
+  });
+
+  it('synchronizes a behind PR branch via GitHub update-branch API, enforces same-origin, and invalidates snapshot cache', async () => {
+    const validSha = 'a'.repeat(40);
+    let snapshotFetches = 0;
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : undefined });
+
+      if (url.endsWith('/pulls/42/update-branch') && method === 'PUT') {
+        return jsonResponse(
+          {
+            message: 'Updating pull request branch.',
+            url: 'https://api.github.com/repos/acme/core-api/pulls/42',
+          },
+          202,
+        );
+      }
+
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        snapshotFetches++;
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    await setupRuntime(fetchFn);
+
+    // Cross-origin POST is rejected without calling GitHub
+    const forbidden = await postUpdateBranch(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/update-branch', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(forbidden.status).toBe(403);
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // Invalid expectedHeadSha is rejected with 400
+    const badSha = await postUpdateBranch(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/update-branch', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expectedHeadSha: 'not-a-sha' }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(badSha.status).toBe(400);
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // Prime snapshot cache
+    await getSnapshot(makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')));
+    expect(snapshotFetches).toBe(1);
+
+    // Valid same-origin update-branch call
+    const okRes = await postUpdateBranch(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/update-branch', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expectedHeadSha: validSha }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(okRes.status).toBe(202);
+    expect(await okRes.json()).toEqual({
+      ok: true,
+      message: 'Updating pull request branch.',
+      url: 'https://api.github.com/repos/acme/core-api/pulls/42',
+    });
+
+    const putCall = calls.find((c) => c.method === 'PUT');
+    expect(putCall?.url).toBe('https://api.github.com/repos/acme/core-api/pulls/42/update-branch');
+    expect(JSON.parse(putCall?.body ?? '{}')).toEqual({ expected_head_sha: validSha });
+
+    // Next snapshot fetch bypasses TTL because cache was invalidated
+    await getSnapshot(makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')));
+    expect(snapshotFetches).toBe(2);
+  });
+
+  it('redacts tokens and surfaces GitHub 422 errors from update-branch', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ message: `expected head sha does not match (${TEST_SECRET})` }, 422),
+      );
+    await setupRuntime(fetchFn);
+
+    const res = await postUpdateBranch(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/update-branch', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+          },
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(res.status).toBe(422);
+    const text = await res.text();
+    expect(text).not.toContain(TEST_SECRET);
+    expect(JSON.parse(text)).toEqual({
+      error: 'expected head sha does not match ([REDACTED])',
+    });
   });
 });

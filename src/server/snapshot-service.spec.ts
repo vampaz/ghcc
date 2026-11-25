@@ -81,6 +81,13 @@ describe('snapshot-service & state machine', () => {
       fetchReviewQueue,
       probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
       fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
     };
 
     const service = createSnapshotService({
@@ -128,6 +135,13 @@ describe('snapshot-service & state machine', () => {
       fetchReviewQueue,
       probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
       fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
     };
 
     const service = createSnapshotService({
@@ -188,6 +202,13 @@ describe('snapshot-service & state machine', () => {
       }),
       probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
       fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
     };
 
     const service = createSnapshotService({
@@ -243,6 +264,13 @@ describe('snapshot-service & state machine', () => {
       }),
       probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
       fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
     };
 
     const service = createSnapshotService({
@@ -258,5 +286,61 @@ describe('snapshot-service & state machine', () => {
     const retried = await service.forceRefresh();
     expect(tokenStore.reloadToken).toHaveBeenCalledTimes(1);
     expect(retried.snapshot.state).toBe('ready');
+  });
+
+  it('fetches open PRs across active repositories and deduplicates with authored/review PRs', async () => {
+    const stateStore = await makeStateStore();
+    const teammatePr = {
+      ...fixtureNoCiRollup,
+      id: 'PR_teammate_5579',
+      number: 5579,
+      title: 'feat: unify status colours across numbers [FE-446]',
+      author: { login: 'sh1ndz' },
+    };
+
+    const fetchRepoPulls = vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+      pullRequests: [fixtureNoCiRollup, teammatePr],
+      rateLimit: null,
+      warnings: [],
+      cost: 1,
+    });
+
+    const client: GitHubClient = {
+      fetchAuthoredPulls: vi.fn<GitHubClient['fetchAuthoredPulls']>().mockResolvedValue({
+        login: VIEWER_LOGIN,
+        pullRequests: [fixtureNoCiRollup],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchReviewQueue: vi.fn<GitHubClient['fetchReviewQueue']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchRepoPulls,
+      probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
+      fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+    };
+
+    const service = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => FIXTURE_NOW_MS,
+    });
+
+    const result = await service.getSnapshot();
+    expect(fetchRepoPulls).toHaveBeenCalledWith('acme', 'docs');
+    expect(result.snapshot.pullRequests).toHaveLength(2);
+
+    const authored = result.snapshot.pullRequests.find((p) => p.number === 202);
+    const team = result.snapshot.pullRequests.find((p) => p.number === 5579);
+    expect(authored?.sources).toEqual(['authored', 'repo']);
+    expect(team?.sources).toEqual(['repo']);
+    expect(team?.author).toBe('sh1ndz');
+    expect(team?.bucket).toBe('waiting');
   });
 });

@@ -14,15 +14,19 @@
       </button>
     </div>
 
-    <div class="control-item">
-      <label for="repo-filter" class="visually-hidden">Filter by repository</label>
-      <select id="repo-filter" class="filter-select" :value="repo" @change="onRepoChange">
-        <option value="">All repositories ({{ totalCount }})</option>
-        <option v-for="entry in repoOptions" :key="entry.name" :value="entry.name">
-          {{ entry.name }} ({{ entry.count }})
-        </option>
-      </select>
-    </div>
+    <label for="include-drafts" class="drafts-checkbox" :class="{ active: drafts }">
+      <input
+        id="include-drafts"
+        type="checkbox"
+        class="drafts-checkbox-input"
+        :checked="drafts"
+        @change="onDraftsChange"
+      />
+      <span class="drafts-checkbox-label">
+        Include drafts
+        <span class="drafts-count mono-num">({{ draftCount }})</span>
+      </span>
+    </label>
 
     <div class="control-item search-wrap">
       <label for="pr-search" class="visually-hidden">Search pull requests</label>
@@ -31,26 +35,33 @@
         ref="searchInputRef"
         type="search"
         class="search-input"
-        placeholder="Search PRs, branches, blockers (/)"
+        placeholder="Search PRs, branches, blockers"
         :value="q"
         @beforeinput="onBeforeInput"
         @input="onQueryInput"
       />
+      <kbd v-if="!q" class="search-kbd" aria-hidden="true">/</kbd>
     </div>
 
     <button
+      v-if="repo"
       type="button"
-      class="draft-toggle"
-      :class="{ active: drafts }"
-      :aria-pressed="drafts"
-      @click="$emit('update:drafts', !drafts)"
+      class="filter-chip repo-chip"
+      :aria-label="`Clear repository filter ${repo}`"
+      @click="$emit('update:repo', '')"
     >
-      <span class="check-box" aria-hidden="true">{{ drafts ? '✓' : '' }}</span>
-      <span>Drafts ({{ draftCount }})</span>
+      <span>{{ compactRepo(repo) }}</span>
+      <span aria-hidden="true">×</span>
     </button>
 
-    <button v-if="bucket" type="button" class="bucket-chip" @click="$emit('update:bucket', '')">
-      <span>bucket: {{ bucket }}</span>
+    <button
+      v-if="bucket"
+      type="button"
+      class="filter-chip bucket-chip"
+      :aria-label="`Clear ${bucketLabel} filter`"
+      @click="$emit('update:bucket', '')"
+    >
+      <span>{{ bucketLabel }}</span>
       <span aria-hidden="true">×</span>
     </button>
 
@@ -64,19 +75,12 @@
 import { computed, ref } from 'vue';
 import type { BucketFilter, ViewFilter } from '@/composables/use-url-state';
 
-interface RepoOption {
-  name: string;
-  count: number;
-}
-
 interface Props {
   view: ViewFilter;
   bucket: BucketFilter;
   q: string;
   repo: string;
   drafts: boolean;
-  repoOptions: RepoOption[];
-  totalCount: number;
   draftCount: number;
 }
 
@@ -98,7 +102,25 @@ const viewOptions: Array<{ value: ViewFilter; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'mine', label: 'Mine' },
   { value: 'review', label: 'To Review' },
+  { value: 'team', label: 'Team' },
 ];
+
+const bucketLabel = computed<string>(() => {
+  switch (props.bucket) {
+    case 'needs-me':
+      return 'Needs You';
+    case 'ready':
+      return 'Ready to Merge';
+    case 'waiting':
+      return 'Waiting on Others';
+    case 'ci-failing':
+      return 'Failing CI';
+    case 'draft':
+      return 'Drafts';
+    default:
+      return '';
+  }
+});
 
 const hasActiveFilters = computed<boolean>(() => {
   return (
@@ -110,9 +132,14 @@ const hasActiveFilters = computed<boolean>(() => {
   );
 });
 
-function onRepoChange(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  emit('update:repo', select.value);
+function onDraftsChange(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  emit('update:drafts', input.checked);
+}
+
+function compactRepo(fullName: string): string {
+  const parts = fullName.split('/');
+  return parts[1] ?? fullName;
 }
 
 function onBeforeInput(event: Event): void {
@@ -161,7 +188,7 @@ defineExpose({ focusSearch });
 }
 
 .seg-btn {
-  min-height: 2rem;
+  min-block-size: 2rem;
   padding: 0.25rem 0.7rem;
   border: 0;
   border-right: 1px solid var(--border-subtle);
@@ -182,20 +209,126 @@ defineExpose({ focusSearch });
   font-weight: 600;
 }
 
+.drafts-checkbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-block-size: 2rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.drafts-checkbox:hover {
+  background-color: var(--bg-surface-hover);
+  color: var(--ink-primary);
+}
+
+.drafts-checkbox.active {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.drafts-checkbox-input {
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.drafts-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.drafts-count {
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+}
+
+.drafts-checkbox.active .drafts-count {
+  color: inherit;
+}
+
+@supports not (accent-color: auto) {
+  .drafts-checkbox-input {
+    position: absolute;
+    clip-path: inset(50%);
+    overflow: hidden;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    white-space: nowrap;
+  }
+
+  .drafts-checkbox-label {
+    position: relative;
+    padding-inline-start: 1.35rem;
+  }
+
+  .drafts-checkbox-label::before {
+    content: '';
+    position: absolute;
+    inset-inline-start: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 0.95rem;
+    height: 0.95rem;
+    border-radius: 0.2rem;
+    border: 1.5px solid var(--border-strong);
+    background-color: var(--bg-surface);
+  }
+
+  .drafts-checkbox-input:focus-visible + .drafts-checkbox-label::before {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .drafts-checkbox-input:checked + .drafts-checkbox-label::before {
+    border-color: var(--accent-blue);
+    background-color: var(--accent-blue);
+  }
+
+  .drafts-checkbox-input:checked + .drafts-checkbox-label::after {
+    content: '✓';
+    position: absolute;
+    inset-inline-start: 0.15rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #ffffff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+}
+
 .control-item {
   min-width: 0;
 }
 
 .search-wrap {
+  position: relative;
   flex: 1 1 13rem;
 }
 
-.filter-select,
 .search-input,
-.draft-toggle,
-.bucket-chip,
+.filter-chip,
 .clear-btn {
-  min-height: 2rem;
+  min-block-size: 2rem;
   padding: 0.25rem 0.625rem;
   border-radius: 0.4rem;
   border: 1px solid var(--border-strong);
@@ -206,10 +339,26 @@ defineExpose({ focusSearch });
 
 .search-input {
   width: 100%;
+  padding-inline-end: 2rem;
 }
 
-.draft-toggle,
-.bucket-chip,
+.search-kbd {
+  position: absolute;
+  inset-inline-end: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.25;
+}
+
+.filter-chip,
 .clear-btn {
   display: inline-flex;
   align-items: center;
@@ -218,25 +367,7 @@ defineExpose({ focusSearch });
   font-weight: 500;
 }
 
-.draft-toggle.active {
-  border-color: var(--accent-blue);
-  background-color: var(--accent-blue-bg);
-  color: var(--accent-blue);
-}
-
-.check-box {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 0.95rem;
-  height: 0.95rem;
-  border-radius: 0.2rem;
-  border: 1px solid var(--border-strong);
-  font-size: 0.7rem;
-  line-height: 1;
-}
-
-.bucket-chip {
+.filter-chip {
   border-color: var(--accent-blue);
   background-color: var(--accent-blue-bg);
   color: var(--accent-blue);
@@ -244,5 +375,15 @@ defineExpose({ focusSearch });
 
 .clear-btn {
   color: var(--ink-secondary);
+}
+
+@media (max-width: 639px), (pointer: coarse) {
+  .search-input {
+    padding-inline-end: 0.625rem;
+  }
+
+  .search-kbd {
+    display: none;
+  }
 }
 </style>

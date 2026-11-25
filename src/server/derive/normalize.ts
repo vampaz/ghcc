@@ -127,6 +127,7 @@ export function isActivePullRequest(raw: RawPullRequest): boolean {
 export function mergeRawPullRequests(
   authored: RawPullRequest[],
   reviewRequested: RawPullRequest[],
+  repoPulls: RawPullRequest[] = [],
 ): RawPrInput[] {
   const merged = new Map<string, RawPrInput>();
 
@@ -148,6 +149,20 @@ export function mergeRawPullRequests(
       }
     } else {
       merged.set(pr.id, { raw: pr, sources: ['review-requested'] });
+    }
+  }
+
+  for (const pr of repoPulls) {
+    if (!isActivePullRequest(pr)) {
+      continue;
+    }
+    const existing = merged.get(pr.id);
+    if (existing) {
+      if (!existing.sources.includes('repo')) {
+        existing.sources.push('repo');
+      }
+    } else {
+      merged.set(pr.id, { raw: pr, sources: ['repo'] });
     }
   }
 
@@ -194,7 +209,15 @@ export function sortPullRequests(prs: PrView[]): PrView[] {
       return b.idleDays - a.idleDays;
     }
     if (a.bucket === 'waiting') {
-      return b.idleDays - a.idleDays;
+      const aAuthored = a.sources.includes('authored');
+      const bAuthored = b.sources.includes('authored');
+      if (aAuthored !== bAuthored) {
+        return aAuthored ? -1 : 1;
+      }
+      if (aAuthored) {
+        return b.idleDays - a.idleDays;
+      }
+      return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
     }
     return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
   });
@@ -294,7 +317,7 @@ export async function normalizePullRequests(
       number: raw.number,
       title: raw.title,
       url: raw.url,
-      author: raw.author?.login ?? options.viewerLogin,
+      author: raw.author?.login ?? (sources.includes('authored') ? options.viewerLogin : 'ghost'),
       baseRefName: raw.baseRefName,
       headRefName: raw.headRefName,
       headRefOid: raw.headRefOid,

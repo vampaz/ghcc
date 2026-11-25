@@ -11,24 +11,52 @@
 
     <ul v-else role="list" class="waiting-list">
       <li v-for="pr in pullRequests" :key="pr.key" class="waiting-item">
-        <button
-          type="button"
-          class="waiting-btn"
-          :class="{ selected: selectedKey === pr.key }"
-          @click="$emit('select', pr)"
-        >
-          <span class="waiting-top">
-            <span class="waiting-key">
-              <span class="waiting-repo">{{ compactRepo(pr.repository) }}</span>
-              <span class="waiting-num mono-num">#{{ pr.number }}</span>
+        <div class="waiting-row">
+          <button
+            type="button"
+            class="waiting-btn"
+            :class="{ selected: selectedKey === pr.key }"
+            @click="$emit('select', pr)"
+          >
+            <span class="waiting-top">
+              <span class="waiting-key">
+                <span class="waiting-repo">{{ compactRepo(pr.repository) }}</span>
+                <span class="waiting-num mono-num">#{{ pr.number }}</span>
+              </span>
+              <span class="waiting-who">{{ waitingReason(pr) }}</span>
+              <span class="waiting-age mono-num">{{
+                formatIdleCompact(pr.idleDays, pr.lastCommittedAt, nowMs)
+              }}</span>
             </span>
-            <span class="waiting-who">{{ waitingReason(pr) }}</span>
-            <span class="waiting-age mono-num">{{
-              formatIdleCompact(pr.idleDays, pr.lastCommittedAt, nowMs)
-            }}</span>
-          </span>
-          <span class="waiting-title">{{ pr.title }}</span>
-        </button>
+            <span class="waiting-title">{{ pr.title }}</span>
+          </button>
+
+          <button
+            v-if="showSyncButton(pr)"
+            type="button"
+            class="waiting-sync-btn"
+            :class="{
+              synced: getSyncState(pr.key).status === 'synced',
+              syncing: getSyncState(pr.key).status === 'syncing',
+            }"
+            :aria-disabled="isSyncBusy(pr.key) ? 'true' : undefined"
+            :aria-label="syncAriaLabel(pr)"
+            :title="`Merge ${pr.baseRefName} into ${pr.headRefName}`"
+            @click="onSyncClick(pr)"
+          >
+            <progress
+              v-if="getSyncState(pr.key).status === 'syncing'"
+              class="loading-spinner"
+              aria-label="Syncing branch"
+            ></progress>
+            <span>{{ syncButtonText(pr.key) }}</span>
+          </button>
+        </div>
+
+        <p v-if="syncError(pr.key)" class="waiting-sync-error" role="alert">
+          {{ syncError(pr.key) }}
+        </p>
+
         <slot name="inline-inspector" :pr="pr" />
       </li>
     </ul>
@@ -36,6 +64,7 @@
 </template>
 
 <script setup lang="ts">
+import { IDLE_PR_SYNC_STATE, type PrSyncState } from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
 
@@ -43,13 +72,57 @@ interface Props {
   pullRequests: PrView[];
   selectedKey: string | null;
   nowMs: number;
+  syncStates?: Record<string, PrSyncState>;
 }
 
-defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  syncStates: () => ({}),
+});
 
-defineEmits<{
+const emit = defineEmits<{
   select: [pr: PrView];
+  sync: [pr: PrView];
 }>();
+
+function getSyncState(prKey: string): PrSyncState {
+  return props.syncStates[prKey] ?? IDLE_PR_SYNC_STATE;
+}
+
+function showSyncButton(pr: PrView): boolean {
+  return pr.merge.state === 'behind' || getSyncState(pr.key).status !== 'idle';
+}
+
+function isSyncBusy(prKey: string): boolean {
+  const status = getSyncState(prKey).status;
+  return status === 'syncing' || status === 'synced';
+}
+
+function syncButtonText(prKey: string): string {
+  const status = getSyncState(prKey).status;
+  if (status === 'syncing') {
+    return 'Syncing';
+  }
+  if (status === 'synced') {
+    return 'Synced';
+  }
+  return 'Sync';
+}
+
+function syncAriaLabel(pr: PrView): string {
+  return `${syncButtonText(pr.key)} ${pr.key} with ${pr.baseRefName}`;
+}
+
+function syncError(prKey: string): string | null {
+  const state = getSyncState(prKey);
+  return state.status === 'error' ? state.error : null;
+}
+
+function onSyncClick(pr: PrView): void {
+  if (isSyncBusy(pr.key)) {
+    return;
+  }
+  emit('sync', pr);
+}
 
 function compactRepo(fullName: string): string {
   const parts = fullName.split('/');
@@ -72,6 +145,9 @@ function waitingReason(pr: PrView): string {
   }
   if (pr.review.decision === 'required') {
     return 'review req';
+  }
+  if (pr.merge.state === 'behind') {
+    return 'behind';
   }
   return pr.merge.state === 'unknown' ? 'merge ?' : 'blocked';
 }
@@ -125,9 +201,16 @@ function waitingReason(pr: PrView): string {
   gap: 0.35rem;
 }
 
+.waiting-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 .waiting-btn {
-  width: 100%;
-  min-height: 2.25rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-block-size: 2.25rem;
   padding: 0.45rem 0.5rem;
   border-radius: 0.375rem;
   border: 1px solid transparent;
@@ -138,6 +221,51 @@ function waitingReason(pr: PrView): string {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+}
+
+.waiting-sync-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-block-size: 1.85rem;
+  min-inline-size: 2rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.35rem;
+  border: 1px solid var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.waiting-sync-btn:hover:not([aria-disabled='true']) {
+  background-color: var(--accent-blue);
+  color: #ffffff;
+}
+
+.waiting-sync-btn.synced {
+  border-color: var(--accent-emerald);
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+}
+
+.waiting-sync-btn[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.waiting-sync-error {
+  margin: 0.25rem 0.5rem 0;
+  padding: 0.35rem 0.5rem;
+  border-radius: 0.35rem;
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 .waiting-btn:hover {

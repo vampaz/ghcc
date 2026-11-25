@@ -8,12 +8,14 @@ import type {
   PrTimelineItem,
   RateLimitBucket,
   SnapshotWarning,
+  UpdateBranchResponse,
 } from '@/types/pr';
 
 const GITHUB_GRAPHQL_URL = 'https://api.github.com/graphql';
 const GITHUB_REST_BASE = 'https://api.github.com';
 const SAFE_SEGMENT_RE = /^[\w.-]+$/;
 const SAFE_NUMBER_RE = /^[1-9]\d*$/;
+const SAFE_SHA_RE = /^[0-9a-f]{40}$/i;
 
 const PR_FIELDS_FRAGMENT = `
 fragment PrFields on PullRequest {
@@ -115,7 +117,7 @@ query Snapshot($cursor: String) {
     login
     pullRequests(
       states: OPEN
-      first: 50
+      first: 25
       after: $cursor
       orderBy: { field: UPDATED_AT, direction: DESC }
     ) {
@@ -143,6 +145,34 @@ query ReviewQueue {
   search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 50) {
     nodes {
       ... on PullRequest {
+        ...PrFields
+      }
+    }
+  }
+  rateLimit {
+    limit
+    cost
+    remaining
+    resetAt
+  }
+}
+${PR_FIELDS_FRAGMENT}
+`;
+
+const REPO_PULLS_QUERY = `
+query RepoPulls($owner: String!, $repo: String!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(
+      states: OPEN
+      first: 25
+      after: $cursor
+      orderBy: { field: UPDATED_AT, direction: DESC }
+    ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
         ...PrFields
       }
     }
@@ -354,6 +384,14 @@ export function validatePullNumber(value: string | number): number {
   return Number(str);
 }
 
+export function validateCommitSha(value: string): string {
+  const trimmed = value.trim();
+  if (!SAFE_SHA_RE.test(trimmed)) {
+    throw new GitHubApiError('Invalid expectedHeadSha', 400);
+  }
+  return trimmed.toLowerCase();
+}
+
 function parseRateLimitHeaders(headers: Headers): RateLimitBucket | null {
   const remaining = headers.get('x-ratelimit-remaining');
   const limit = headers.get('x-ratelimit-limit');
@@ -455,6 +493,11 @@ export type ProbeMergeabilityResult =
 export interface GitHubClient {
   fetchAuthoredPulls(options?: { maxPages?: number }): Promise<AuthoredPullsResult>;
   fetchReviewQueue(): Promise<ReviewQueueResult>;
+  fetchRepoPulls(
+    owner: string,
+    repo: string,
+    options?: { maxPages?: number },
+  ): Promise<ReviewQueueResult>;
   probeMergeability(
     owner: string,
     repo: string,
@@ -462,6 +505,12 @@ export interface GitHubClient {
     etag?: string,
   ): Promise<ProbeMergeabilityResult>;
   fetchPullDetail(owner: string, repo: string, number: number): Promise<PrDetailResponse>;
+  updatePullBranch(
+    owner: string,
+    repo: string,
+    number: number,
+    expectedHeadSha?: string,
+  ): Promise<UpdateBranchResponse>;
 }
 
 export interface GitHubClientDeps {
@@ -629,23 +678,31 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
     headerRateLimit: RateLimitBucket | null;
   }> {
     const token = await deps.tokenStore.getToken();
-    let response: Response;
-    try {
-      response = await fetchFn(GITHUB_GRAPHQL_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'User-Agent': 'ghcc/0.1',
-        },
-        body: JSON.stringify({ query, variables }),
-      });
-    } catch (error) {
-      throw new GitHubApiError(
-        `GitHub GraphQL network error: ${sanitizeErrorMessage(error, token)}`,
-        502,
-      );
+    let response!: Response;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        response = await fetchFn(GITHUB_GRAPHQL_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'User-Agent': 'ghcc/0.1',
+          },
+          body: JSON.stringify({ query, variables }),
+        });
+      } catch (error) {
+        throw new GitHubApiError(
+          `GitHub GraphQL network error: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      if ((response.status === 503 || response.status === 504) && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
+      break;
     }
 
     const headerRateLimit = parseRateLimitHeaders(response.headers);
@@ -803,6 +860,75 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         warnings: res.warnings,
         cost: res.data.rateLimit?.cost ?? 0,
       };
+    },
+
+    async fetchRepoPulls(owner: string, repo: string, options = {}): Promise<ReviewQueueResult> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const maxPages = options.maxPages ?? 6;
+      const pullRequests: RawPullRequest[] = [];
+      const warnings: SnapshotWarning[] = [];
+      let cursor: string | null = null;
+      let rateLimit: RateLimitBucket | null = null;
+      let totalCost = 0;
+
+      for (let page = 0; page < maxPages; page++) {
+        interface RepoPullsData {
+          repository?: {
+            pullRequests: {
+              pageInfo: { hasNextPage: boolean; endCursor: string | null };
+              nodes: Array<RawPullRequest | null>;
+            };
+          } | null;
+          rateLimit?: {
+            limit: number;
+            cost: number;
+            remaining: number;
+            resetAt: string;
+          };
+        }
+
+        const res: {
+          data: RepoPullsData;
+          warnings: SnapshotWarning[];
+          headerRateLimit: RateLimitBucket | null;
+        } = await executeGraphql<RepoPullsData>(REPO_PULLS_QUERY, {
+          owner: safeOwner,
+          repo: safeRepo,
+          cursor,
+        });
+
+        warnings.push(...res.warnings);
+
+        if (res.data.rateLimit) {
+          rateLimit = {
+            remaining: res.data.rateLimit.remaining,
+            limit: res.data.rateLimit.limit,
+            resetAt: res.data.rateLimit.resetAt,
+          };
+          totalCost += res.data.rateLimit.cost ?? 0;
+        } else if (res.headerRateLimit) {
+          rateLimit = res.headerRateLimit;
+        }
+
+        const prConn = res.data.repository?.pullRequests;
+        if (!prConn) {
+          break;
+        }
+
+        for (const node of prConn.nodes) {
+          if (node) {
+            pullRequests.push(node);
+          }
+        }
+
+        if (!prConn.pageInfo.hasNextPage || !prConn.pageInfo.endCursor) {
+          break;
+        }
+        cursor = prConn.pageInfo.endCursor;
+      }
+
+      return { pullRequests, rateLimit, warnings, cost: totalCost };
     },
 
     async probeMergeability(
@@ -1019,6 +1145,97 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         reviewers: Array.from(reviewerMap.values()),
         timeline: timeline.reverse(),
         fetchedAt: new Date(now()).toISOString(),
+      };
+    },
+
+    async updatePullBranch(
+      owner: string,
+      repo: string,
+      number: number,
+      expectedHeadSha?: string,
+    ): Promise<UpdateBranchResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+      const safeSha =
+        expectedHeadSha !== undefined ? validateCommitSha(expectedHeadSha) : undefined;
+      const token = await deps.tokenStore.getToken();
+
+      let response: Response;
+      try {
+        response = await fetchFn(
+          `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}/pulls/${safeNum}/update-branch`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': 'ghcc/0.1',
+            },
+            body: JSON.stringify(safeSha ? { expected_head_sha: safeSha } : {}),
+          },
+        );
+      } catch (error) {
+        throw new GitHubApiError(
+          `Network error updating pull request branch: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      const coreRateLimit = parseRateLimitHeaders(response.headers);
+
+      if (response.status === 401) {
+        throw new GitHubAuthError('GitHub rejected token when updating branch (401 Unauthorized)');
+      }
+
+      if (response.status === 404) {
+        throw new GitHubNotFoundError(
+          `Pull request ${safeOwner}/${safeRepo}#${safeNum} not found or inaccessible`,
+        );
+      }
+
+      if (response.status === 403 || response.status === 429) {
+        const isRateLimit =
+          response.status === 429 ||
+          coreRateLimit?.remaining === 0 ||
+          response.headers.has('retry-after');
+        if (isRateLimit) {
+          throw new GitHubRateLimitError(
+            `GitHub REST rate limit exceeded (HTTP ${response.status})`,
+            parseResetAtFromResponse(response.headers, now()),
+          );
+        }
+      }
+
+      const rawText = await response.text();
+      let parsedBody: { message?: unknown; url?: unknown } | null = null;
+      if (rawText) {
+        try {
+          parsedBody = JSON.parse(rawText) as { message?: unknown; url?: unknown };
+        } catch {
+          parsedBody = null;
+        }
+      }
+
+      if (!response.ok) {
+        const rawMessage =
+          typeof parsedBody?.message === 'string' && parsedBody.message.trim().length > 0
+            ? parsedBody.message.trim()
+            : `GitHub update-branch failed (HTTP ${response.status})`;
+        throw new GitHubApiError(redactToken(rawMessage, token), response.status);
+      }
+
+      const message =
+        typeof parsedBody?.message === 'string' && parsedBody.message.trim().length > 0
+          ? redactToken(parsedBody.message.trim(), token)
+          : 'Updating pull request branch.';
+
+      return {
+        ok: true,
+        message,
+        ...(typeof parsedBody?.url === 'string' ? { url: parsedBody.url } : {}),
       };
     },
   };

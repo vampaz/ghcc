@@ -19,6 +19,9 @@
         <span class="pr-top-row">
           <span class="pr-key mono-num">{{ pr.key }}</span>
           <span class="pr-tags">
+            <span v-if="!pr.sources.includes('authored')" class="tag" data-tone="muted">
+              @{{ pr.author }}
+            </span>
             <span v-if="reviewBadge" class="tag" data-tone="amber">{{ reviewBadge }}</span>
             <span v-else-if="pr.bucket === 'ready'" class="tag" data-tone="ok">ready</span>
             <span v-else-if="pr.mergeQueue" class="tag" data-tone="blue">
@@ -69,17 +72,44 @@
         </span>
       </button>
 
-      <a
-        :href="pr.url"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="external-link"
-        :aria-label="`Open ${pr.key} on GitHub`"
-        title="Open on GitHub (o)"
-      >
-        ↗
-      </a>
+      <div class="pr-card-actions">
+        <button
+          v-if="showSyncButton"
+          type="button"
+          class="sync-btn"
+          :class="{
+            synced: syncState.status === 'synced',
+            syncing: syncState.status === 'syncing',
+          }"
+          :aria-disabled="isSyncBusy ? 'true' : undefined"
+          :aria-label="syncAriaLabel"
+          :title="`Merge ${pr.baseRefName} into ${pr.headRefName}`"
+          @click="onSyncClick"
+        >
+          <progress
+            v-if="syncState.status === 'syncing'"
+            class="loading-spinner"
+            aria-label="Syncing branch"
+          ></progress>
+          <span>{{ syncButtonText }}</span>
+        </button>
+
+        <a
+          :href="pr.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="external-link"
+          :aria-label="`Open ${pr.key} on GitHub`"
+          title="Open on GitHub (o)"
+        >
+          ↗
+        </a>
+      </div>
     </div>
+
+    <p v-if="syncState.status === 'error'" class="sync-error" role="alert">
+      {{ syncState.error }}
+    </p>
 
     <slot name="inline-inspector" />
   </li>
@@ -87,6 +117,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { IDLE_PR_SYNC_STATE, type PrSyncState } from '@/composables/use-dashboard-state';
 import type { PrView } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
 
@@ -94,13 +125,46 @@ interface Props {
   pr: PrView;
   isSelected: boolean;
   nowMs: number;
+  syncState?: PrSyncState;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  syncState: () => IDLE_PR_SYNC_STATE,
+});
 
-defineEmits<{
+const emit = defineEmits<{
   select: [pr: PrView];
+  sync: [pr: PrView];
 }>();
+
+const showSyncButton = computed<boolean>(
+  () => props.pr.merge.state === 'behind' || props.syncState.status !== 'idle',
+);
+
+const isSyncBusy = computed<boolean>(
+  () => props.syncState.status === 'syncing' || props.syncState.status === 'synced',
+);
+
+const syncButtonText = computed<string>(() => {
+  if (props.syncState.status === 'syncing') {
+    return 'Syncing';
+  }
+  if (props.syncState.status === 'synced') {
+    return 'Synced';
+  }
+  return 'Sync';
+});
+
+const syncAriaLabel = computed<string>(() => {
+  return `${syncButtonText.value} ${props.pr.key} with ${props.pr.baseRefName}`;
+});
+
+function onSyncClick(): void {
+  if (isSyncBusy.value) {
+    return;
+  }
+  emit('sync', props.pr);
+}
 
 const edgeTone = computed<'red' | 'amber' | 'emerald' | 'muted'>(() => {
   if (props.pr.isDraft && props.pr.bucket === 'draft') {
@@ -167,6 +231,7 @@ const diffWidths = computed(() => {
 <style scoped>
 .pr-card {
   position: relative;
+  container-type: inline-size;
   border-radius: 0.5rem;
   border: 1px solid var(--border-subtle);
   border-left-width: 4px;
@@ -207,8 +272,9 @@ const diffWidths = computed(() => {
 
 .pr-card-body {
   display: flex;
-  align-items: flex-start;
-  gap: 0.375rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
 }
 
 .pr-card-trigger {
@@ -218,7 +284,7 @@ const diffWidths = computed(() => {
   flex-direction: column;
   align-items: stretch;
   gap: 0.35rem;
-  padding: 0.75rem 0.5rem 0.75rem 0.875rem;
+  padding: 0.75rem 0.875rem;
   border: 0;
   background: transparent;
   color: inherit;
@@ -372,14 +438,84 @@ const diffWidths = computed(() => {
   color: var(--ink-muted);
 }
 
+.pr-card-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  padding: 0 0.875rem 0.625rem;
+}
+
+@container (min-width: 28rem) {
+  .pr-card-body {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.375rem;
+  }
+
+  .pr-card-trigger {
+    padding: 0.75rem 0.5rem 0.75rem 0.875rem;
+  }
+
+  .pr-card-actions {
+    display: inline-flex;
+    padding: 0;
+    margin: 0.625rem 0.625rem 0 0;
+  }
+}
+
+.sync-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sync-btn:hover:not([aria-disabled='true']) {
+  background-color: var(--accent-blue);
+  color: #ffffff;
+}
+
+.sync-btn.synced {
+  border-color: var(--accent-emerald);
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+}
+
+.sync-btn[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.sync-error {
+  margin: 0 0.875rem 0.65rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.35rem;
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .external-link {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2rem;
-  min-height: 2rem;
-  margin: 0.625rem 0.625rem 0 0;
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
   border-radius: 0.375rem;
   border: 1px solid var(--border-subtle);
   background-color: var(--bg-surface-muted);
