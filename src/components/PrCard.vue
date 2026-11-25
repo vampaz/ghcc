@@ -81,6 +81,14 @@
       </button>
 
       <div class="pr-card-actions">
+        <MergeControl
+          v-if="!pr.isDraft"
+          compact
+          :pr="pr"
+          :merge-state="mergeState"
+          @request-merge="(target, method) => $emit('request-merge', target, method)"
+        />
+
         <DraftToggle
           :pr-key="pr.key"
           :is-draft="pr.isDraft"
@@ -106,6 +114,11 @@
             class="loading-spinner"
             aria-label="Syncing branch"
           ></progress>
+          <CarbonIcon
+            v-else
+            :name="syncState.status === 'synced' ? 'checkmark' : 'renew'"
+            :size="13"
+          />
           <span>{{ syncButtonText }}</span>
         </button>
 
@@ -117,10 +130,14 @@
           :aria-label="`Open ${pr.key} on GitHub`"
           title="Open on GitHub (o)"
         >
-          ↗
+          <CarbonIcon name="launch" :size="15" />
         </a>
       </div>
     </div>
+
+    <p v-if="mergeState.status === 'error'" class="sync-error" role="alert">
+      {{ mergeState.error }}
+    </p>
 
     <p v-if="draftState.status === 'error'" class="sync-error" role="alert">
       {{ draftState.error }}
@@ -136,14 +153,18 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
+import MergeControl from '@/components/MergeControl.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
   type PrDraftState,
+  type PrMergeState,
   type PrSyncState,
 } from '@/composables/use-dashboard-state';
-import type { PrView } from '@/types/pr';
+import type { MergeMethod, PrView } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
 
 interface Props {
@@ -152,17 +173,20 @@ interface Props {
   nowMs: number;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
+  mergeState?: PrMergeState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
+  mergeState: () => IDLE_PR_MERGE_STATE,
 });
 
 const emit = defineEmits<{
   select: [pr: PrView];
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
+  'request-merge': [pr: PrView, method: MergeMethod];
 }>();
 
 const showSyncButton = computed<boolean>(

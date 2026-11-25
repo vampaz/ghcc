@@ -22,9 +22,13 @@
           rel="noopener noreferrer"
           class="drawer-btn"
         >
-          GitHub ↗
+          <span>GitHub</span>
+          <CarbonIcon name="launch" :size="14" />
         </a>
-        <button type="button" class="drawer-btn" @click="$emit('close')">Close</button>
+        <button type="button" class="drawer-btn" @click="$emit('close')">
+          <CarbonIcon name="close" :size="14" />
+          <span>Close</span>
+        </button>
       </div>
     </div>
 
@@ -35,9 +39,11 @@
         :now-ms="nowMs"
         :sync-state="syncState"
         :draft-state="draftState"
+        :merge-state="mergeState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
+        @request-merge="(target, method) => $emit('request-merge', target, method)"
       />
     </div>
   </aside>
@@ -49,7 +55,10 @@
   >
     <div class="inline-header">
       <h2 id="inspector-inline-title" class="inline-title">Pull Request Details</h2>
-      <button type="button" class="drawer-btn" @click="$emit('close')">Close</button>
+      <button type="button" class="drawer-btn" @click="$emit('close')">
+        <CarbonIcon name="close" :size="14" />
+        <span>Close</span>
+      </button>
     </div>
     <PrInspectorBody
       :pr="pr"
@@ -57,24 +66,29 @@
       :now-ms="nowMs"
       :sync-state="syncState"
       :draft-state="draftState"
+      :merge-state="mergeState"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
+      @request-merge="(target, method) => $emit('request-merge', target, method)"
     />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import PrInspectorBody from '@/components/PrInspectorBody.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
   type InspectorState,
   type PrDraftState,
+  type PrMergeState,
   type PrSyncState,
 } from '@/composables/use-dashboard-state';
-import type { PrView } from '@/types/pr';
+import type { MergeMethod, PrView } from '@/types/pr';
 
 interface Props {
   mode: 'dialog' | 'inline';
@@ -83,11 +97,13 @@ interface Props {
   nowMs: number;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
+  mergeState?: PrMergeState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
+  mergeState: () => IDLE_PR_MERGE_STATE,
 });
 
 defineEmits<{
@@ -95,6 +111,7 @@ defineEmits<{
   retry: [pr: PrView];
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
+  'request-merge': [pr: PrView, method: MergeMethod];
 }>();
 
 const lastOpenPr = ref<PrView | null>(props.pr);
@@ -217,6 +234,7 @@ const activeInspector = computed<InspectorState>(() =>
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 0.3rem;
   min-height: 2rem;
   padding: 0.25rem 0.65rem;
   border-radius: 0.375rem;

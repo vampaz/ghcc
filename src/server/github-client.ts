@@ -2,6 +2,8 @@ import type { TokenStore } from '@/server/auth';
 import type { RawPullRequest } from '@/server/derive/types';
 import { redactToken, sanitizeErrorMessage } from '@/server/redact';
 import type {
+  MergeMethod,
+  MergePullResponse,
   PrDetailCheck,
   PrDetailResponse,
   PrReviewerDetail,
@@ -551,6 +553,12 @@ export interface GitHubClient {
     number: number,
     isDraft: boolean,
   ): Promise<ToggleDraftResponse>;
+  mergePullRequest(
+    owner: string,
+    repo: string,
+    number: number,
+    options?: { mergeMethod?: MergeMethod; expectedHeadSha?: string },
+  ): Promise<MergePullResponse>;
 }
 
 export interface GitHubClientDeps {
@@ -1365,6 +1373,114 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
       }
 
       return { ok: true, isDraft: updated.isDraft };
+    },
+
+    async mergePullRequest(
+      owner: string,
+      repo: string,
+      number: number,
+      options: { mergeMethod?: MergeMethod; expectedHeadSha?: string } = {},
+    ): Promise<MergePullResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+      const mergeMethod: MergeMethod = options.mergeMethod === 'merge' ? 'merge' : 'squash';
+      const safeSha =
+        options.expectedHeadSha !== undefined
+          ? validateCommitSha(options.expectedHeadSha)
+          : undefined;
+      const token = await deps.tokenStore.getToken();
+
+      let response: Response;
+      try {
+        response = await fetchFn(
+          `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}/pulls/${safeNum}/merge`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': 'ghcc/0.1',
+            },
+            body: JSON.stringify({
+              merge_method: mergeMethod,
+              ...(safeSha ? { sha: safeSha } : {}),
+            }),
+          },
+        );
+      } catch (error) {
+        throw new GitHubApiError(
+          `Network error merging pull request: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      const coreRateLimit = parseRateLimitHeaders(response.headers);
+
+      if (response.status === 401) {
+        throw new GitHubAuthError(
+          'GitHub rejected token when merging pull request (401 Unauthorized)',
+        );
+      }
+
+      if (response.status === 404) {
+        throw new GitHubNotFoundError(
+          `Pull request ${safeOwner}/${safeRepo}#${safeNum} not found or inaccessible`,
+        );
+      }
+
+      if (response.status === 403 || response.status === 429) {
+        const isRateLimit =
+          response.status === 429 ||
+          coreRateLimit?.remaining === 0 ||
+          response.headers.has('retry-after');
+        if (isRateLimit) {
+          throw new GitHubRateLimitError(
+            `GitHub REST rate limit exceeded (HTTP ${response.status})`,
+            parseResetAtFromResponse(response.headers, now()),
+          );
+        }
+      }
+
+      const rawText = await response.text();
+      let parsedBody: { sha?: unknown; merged?: unknown; message?: unknown } | null = null;
+      if (rawText) {
+        try {
+          parsedBody = JSON.parse(rawText) as {
+            sha?: unknown;
+            merged?: unknown;
+            message?: unknown;
+          };
+        } catch {
+          parsedBody = null;
+        }
+      }
+
+      if (!response.ok || parsedBody?.merged === false) {
+        const rawMessage =
+          typeof parsedBody?.message === 'string' && parsedBody.message.trim().length > 0
+            ? parsedBody.message.trim()
+            : `GitHub merge failed (HTTP ${response.status})`;
+        throw new GitHubApiError(
+          redactToken(rawMessage, token),
+          response.ok ? 409 : response.status,
+        );
+      }
+
+      const message =
+        typeof parsedBody?.message === 'string' && parsedBody.message.trim().length > 0
+          ? redactToken(parsedBody.message.trim(), token)
+          : 'Pull Request successfully merged';
+
+      return {
+        ok: true,
+        merged: true,
+        sha: typeof parsedBody?.sha === 'string' ? parsedBody.sha : '',
+        message,
+        mergeMethod,
+      };
     },
   };
 }

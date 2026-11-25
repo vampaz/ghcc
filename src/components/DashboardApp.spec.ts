@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DashboardApp from '@/components/DashboardApp.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
   transitionPrDraftState,
+  transitionPrMergeState,
   transitionPrSyncState,
 } from '@/composables/use-dashboard-state';
 import {
@@ -218,20 +220,31 @@ describe('DashboardApp', () => {
     expect(wrapper.find('#repo-filter').exists()).toBe(false);
     // Primary action queue shows all active PRs (needs-me + ready + waiting = 3 cards)
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
+    expect(wrapper.find('svg.carbon-icon use[href="/icons.svg#carbon-terminal"]').exists()).toBe(
+      true,
+    );
+    expect(wrapper.find('svg.carbon-icon use[href="/icons.svg#carbon-launch"]').exists()).toBe(
+      true,
+    );
+    expect(
+      wrapper.find('svg.carbon-icon use[href="/icons.svg#carbon-warning-filled"]').exists(),
+    ).toBe(true);
     expect(wrapper.text()).toContain('vampaz');
     expect(wrapper.text()).toContain('GQL 4950/5000');
 
-    // Click READY KPI tile -> filters action queue to ready PR with human-readable chip
+    // Click READY KPI tile -> filters action queue to ready PR with human-readable chip and hides WaitingPanel
     const kpiTiles = wrapper.findAll('.kpi-tile');
     await kpiTiles[1]!.trigger('click');
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
     expect(wrapper.find('.action-queue').text()).toContain('acme/web-app#202');
     expect(wrapper.find('.bucket-chip').text()).toContain('Ready to Merge');
+    expect(wrapper.find('#waiting-heading').exists()).toBe(false);
     expect(window.location.search).toContain('bucket=ready');
 
-    // Clear bucket filter via chip
+    // Clear bucket filter via chip -> restores WaitingPanel
     await wrapper.find('.bucket-chip').trigger('click');
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
+    expect(wrapper.find('#waiting-heading').exists()).toBe(true);
 
     // Click WAITING KPI tile -> hides right-rail WaitingPanel to avoid duplication
     await kpiTiles[2]!.trigger('click');
@@ -1044,6 +1057,148 @@ describe('DashboardApp', () => {
         .find('.waiting-item button[aria-label="Ready — acme/worker#303"]')
         .attributes('aria-pressed'),
     ).toBe('true');
+
+    wrapper.unmount();
+  });
+
+  it('supports GitHub-style Squash/Merge split button, confirmation dialog with bypass warning, and error handling', async () => {
+    // Verify explicit merge FSM transitions
+    const merging = transitionPrMergeState(IDLE_PR_MERGE_STATE, {
+      type: 'MERGE_REQUEST',
+      mergeMethod: 'squash',
+    });
+    expect(merging).toEqual({ status: 'merging', mergeMethod: 'squash' });
+    const failed = transitionPrMergeState(merging, {
+      type: 'MERGE_FAILED',
+      mergeMethod: 'squash',
+      error: 'Head branch was modified',
+    });
+    expect(failed).toEqual({
+      status: 'error',
+      mergeMethod: 'squash',
+      error: 'Head branch was modified',
+    });
+    const retrying = transitionPrMergeState(failed, {
+      type: 'MERGE_REQUEST',
+      mergeMethod: 'merge',
+    });
+    expect(
+      transitionPrMergeState(retrying, {
+        type: 'MERGE_SUCCEEDED',
+        mergeMethod: 'merge',
+        sha: 'a'.repeat(40),
+        message: 'Pull Request successfully merged',
+      }),
+    ).toEqual({
+      status: 'merged',
+      mergeMethod: 'merge',
+      sha: 'a'.repeat(40),
+      message: 'Pull Request successfully merged',
+    });
+
+    const headSha101 = 'a'.repeat(40);
+    const headSha202 = 'b'.repeat(40);
+    let merged101 = false;
+    const mergeCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/pull/acme/core-api/101/merge') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        mergeCalls.push({ url, body });
+        merged101 = true;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            merged: true,
+            sha: '9'.repeat(40),
+            message: 'Pull Request successfully merged',
+            mergeMethod: body.mergeMethod ?? 'squash',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url === '/api/pull/acme/web-app/202/merge') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        mergeCalls.push({ url, body });
+        return new Response(JSON.stringify({ error: 'Protected branch hook declined' }), {
+          status: 405,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      const base = makeSnapshot();
+      const prs = base.pullRequests
+        .map((p) => {
+          if (p.key === 'acme/core-api#101') {
+            return { ...p, headRefOid: headSha101 };
+          }
+          if (p.key === 'acme/web-app#202') {
+            return { ...p, headRefOid: headSha202 };
+          }
+          return p;
+        })
+        .filter((p) => !(merged101 && p.key === 'acme/core-api#101'));
+
+      return new Response(JSON.stringify({ ...base, pullRequests: prs }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: merged101 ? '"m2"' : '"m1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Non-draft PRs (including failing CI #101) show Squash split button; drafts do not
+    await wrapper.find('#include-drafts').setValue(true);
+    expect(wrapper.findAll('.action-queue .merge-split')).toHaveLength(3);
+    expect(wrapper.find('button[aria-label="Squash — acme/docs#404"]').exists()).toBe(false);
+
+    // Click Squash on failing-CI PR #101 -> opens confirmation dialog with bypass notice
+    await wrapper.find('button[aria-label="Squash — acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    const dialog = wrapper.find('.merge-confirm-dialog');
+    expect(dialog.attributes('open')).toBeDefined();
+    expect(dialog.text()).toContain('Bypass notice');
+    expect(dialog.text()).toContain('CI checks are failing');
+    expect(dialog.find('.merge-submit-btn').text()).toBe('Confirm squash and merge');
+
+    // Confirm squash and merge -> sends POST with squash + expectedHeadSha and removes PR
+    await dialog.find('.merge-submit-btn').trigger('click');
+    await flushPromises();
+    expect(mergeCalls[0]).toEqual({
+      url: '/api/pull/acme/core-api/101/merge',
+      body: { mergeMethod: 'squash', expectedHeadSha: headSha101 },
+    });
+    expect(wrapper.find('[data-pr-key="acme/core-api#101"]').exists()).toBe(false);
+
+    // Switch #202 split button dropdown to "Create a merge commit" -> label updates to Merge
+    await wrapper
+      .find('button[aria-label="Select merge method for acme/web-app#202"]')
+      .trigger('click');
+    await flushPromises();
+    const regularMergeItem = wrapper
+      .findAll('[role="menuitemradio"]')
+      .find((item) => item.text().includes('Create a merge commit'));
+    expect(regularMergeItem).toBeTruthy();
+    await regularMergeItem!.trigger('click');
+    await flushPromises();
+
+    const mergeBtn202 = wrapper.find('button[aria-label="Merge — acme/web-app#202"]');
+    expect(mergeBtn202.text()).toContain('Merge');
+    await mergeBtn202.trigger('click');
+    await flushPromises();
+    expect(dialog.find('.merge-submit-btn').text()).toBe('Confirm merge');
+
+    // Confirming #202 hits mocked 405 error -> surfaces error inline inside dialog
+    await dialog.find('.merge-submit-btn').trigger('click');
+    await flushPromises();
+    expect(mergeCalls[1]).toEqual({
+      url: '/api/pull/acme/web-app/202/merge',
+      body: { mergeMethod: 'merge', expectedHeadSha: headSha202 },
+    });
+    expect(dialog.find('.merge-dialog-error').text()).toContain('Protected branch hook declined');
 
     wrapper.unmount();
   });

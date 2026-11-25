@@ -4,10 +4,24 @@
       <p class="summary-callout">{{ pr.blockerSummary }}</p>
       <div class="branch-line mono-num">
         <span>{{ pr.headRefName }}</span>
-        <span aria-hidden="true">→</span>
+        <CarbonIcon name="arrow-right" :size="12" />
         <span>{{ pr.baseRefName }}</span>
         <span class="meta-sep">·</span>
         <span>by @{{ pr.author }}</span>
+      </div>
+
+      <div v-if="!pr.isDraft" class="draft-callout">
+        <div class="draft-callout-row">
+          <span class="draft-callout-label">Merge pull request</span>
+          <MergeControl
+            :pr="pr"
+            :merge-state="mergeState"
+            @request-merge="(target, method) => $emit('request-merge', target, method)"
+          />
+        </div>
+        <p v-if="mergeState.status === 'error'" class="sync-error-note" role="alert">
+          {{ mergeState.error }}
+        </p>
       </div>
 
       <div class="draft-callout">
@@ -43,6 +57,11 @@
               class="loading-spinner"
               aria-label="Syncing branch"
             ></progress>
+            <CarbonIcon
+              v-else
+              :name="syncState.status === 'synced' ? 'checkmark' : 'renew'"
+              :size="14"
+            />
             <span>{{ syncButtonText }}</span>
           </button>
           <span class="sync-hint">Merges {{ pr.baseRefName }} into {{ pr.headRefName }}</span>
@@ -93,7 +112,8 @@
               rel="noopener noreferrer"
               class="detail-link"
             >
-              details ↗
+              <span>details</span>
+              <CarbonIcon name="launch" :size="12" />
             </a>
           </li>
         </ul>
@@ -141,15 +161,19 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
+import MergeControl from '@/components/MergeControl.vue';
 import {
   IDLE_PR_DRAFT_STATE,
+  IDLE_PR_MERGE_STATE,
   IDLE_PR_SYNC_STATE,
   type InspectorState,
   type PrDraftState,
+  type PrMergeState,
   type PrSyncState,
 } from '@/composables/use-dashboard-state';
-import type { PrView } from '@/types/pr';
+import type { MergeMethod, PrView } from '@/types/pr';
 import { formatRelativeAge } from '@/utils/format';
 
 interface Props {
@@ -158,17 +182,20 @@ interface Props {
   nowMs: number;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
+  mergeState?: PrMergeState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
+  mergeState: () => IDLE_PR_MERGE_STATE,
 });
 
 const emit = defineEmits<{
   retry: [pr: PrView];
   sync: [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
+  'request-merge': [pr: PrView, method: MergeMethod];
 }>();
 
 const showSyncAction = computed<boolean>(
@@ -232,6 +259,7 @@ function onSyncClick(): void {
 .branch-line {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.35rem;
   font-size: 0.75rem;
   color: var(--ink-secondary);
@@ -453,6 +481,9 @@ function onSyncClick(): void {
 
 .detail-link {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   color: var(--accent-blue);
   text-decoration: none;
   font-size: 0.75rem;

@@ -7,7 +7,7 @@ A local and self-hosted web dashboard for pull requests you authored, pull reque
 - **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); full-width **Action Queue** (including your authored waiting PRs) alongside a **Waiting on Others** quick-jump panel and `stale` badge after 3+ idle days.
 - **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, and blocker summary; multi-repository checkboxes with a tri-state toggle-all in **By Repository**; URL-synced filter state.
 - **Non-modal PR inspector**: Slide-over right sidebar showing full CI checks, reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
-- **Pull request actions**: Per-PR `Ready | Draft` toggle (GitHub GraphQL mutations) and `Sync` button to merge the base branch into behind-base PRs (GitHub `update-branch` REST API), both same-origin protected.
+- **Pull request actions**: Per-PR `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), and `Sync` button to merge the base branch into behind-base PRs (GitHub `update-branch` REST API), all same-origin protected.
 - **Live polling & theme**: Configurable auto-refresh (`120s` default) plus manual refresh (`r`), GraphQL rate-limit indicator, and light/dark mode toggle.
 
 ## Run with Docker
@@ -147,6 +147,7 @@ The bare-metal server binds to `127.0.0.1:4321` by default (`HOST` and `PORT` ca
 - `GET /api/pull/{owner}/{repo}/{number}` — loads full checks, reviewers, and last 5 timeline items for the inspector
 - `POST /api/pull/{owner}/{repo}/{number}/update-branch` — merges the base branch into a behind pull request branch via GitHub's `update-branch` API (same-origin protected)
 - `POST /api/pull/{owner}/{repo}/{number}/draft` — converts a pull request to draft or marks it ready for review via GitHub GraphQL (same-origin protected)
+- `POST /api/pull/{owner}/{repo}/{number}/merge` — merges a pull request via GitHub's merge API (`squash` by default or `merge` commit, same-origin protected)
 
 ## Checks
 

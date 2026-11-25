@@ -64,9 +64,11 @@
           :has-filters="hasActiveFilters"
           :sync-states="syncStates"
           :draft-states="draftStates"
+          :merge-states="mergeStates"
           @select="onSelectPr"
           @sync="syncPullRequest"
           @toggle-draft="togglePullDraft"
+          @request-merge="openMergeConfirm"
         >
           <template #inline-inspector="{ pr }">
             <PrInspector
@@ -77,17 +79,19 @@
               :now-ms="nowMs"
               :sync-state="syncStates[pr.key]"
               :draft-state="draftStates[pr.key]"
+              :merge-state="mergeStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
               @toggle-draft="togglePullDraft"
+              @request-merge="openMergeConfirm"
             />
           </template>
         </ActionQueue>
 
         <aside class="context-rail app-scroll" aria-label="Waiting queue and repositories">
           <WaitingPanel
-            v-if="bucket !== 'waiting' && view !== 'team'"
+            v-if="bucket === '' && view !== 'team'"
             :pull-requests="waitingPullRequests"
             :selected-key="activeKey"
             :now-ms="nowMs"
@@ -106,10 +110,12 @@
                 :now-ms="nowMs"
                 :sync-state="syncStates[pr.key]"
                 :draft-state="draftStates[pr.key]"
+                :merge-state="mergeStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
                 @toggle-draft="togglePullDraft"
+                @request-merge="openMergeConfirm"
               />
             </template>
           </WaitingPanel>
@@ -149,10 +155,21 @@
       :now-ms="nowMs"
       :sync-state="selectedPr ? syncStates[selectedPr.key] : undefined"
       :draft-state="selectedPr ? draftStates[selectedPr.key] : undefined"
+      :merge-state="selectedPr ? mergeStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
       @toggle-draft="togglePullDraft"
+      @request-merge="openMergeConfirm"
+    />
+
+    <MergeConfirmDialog
+      :open="mergeConfirm.status === 'open'"
+      :pr="mergeConfirm.status === 'open' ? mergeConfirm.pr : null"
+      :initial-method="mergeConfirm.status === 'open' ? mergeConfirm.mergeMethod : 'squash'"
+      :merge-state="mergeConfirm.status === 'open' ? mergeStates[mergeConfirm.pr.key] : undefined"
+      @close="closeMergeConfirm"
+      @confirm="onConfirmMerge"
     />
 
     <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -167,6 +184,7 @@ import ActionQueue from '@/components/ActionQueue.vue';
 import AppHeader from '@/components/AppHeader.vue';
 import FilterBar from '@/components/FilterBar.vue';
 import KpiStrip from '@/components/KpiStrip.vue';
+import MergeConfirmDialog from '@/components/MergeConfirmDialog.vue';
 import PrInspector from '@/components/PrInspector.vue';
 import RepoBreakdown from '@/components/RepoBreakdown.vue';
 import WaitingPanel from '@/components/WaitingPanel.vue';
@@ -180,7 +198,11 @@ import {
   toggleRepoInSelection,
   useUrlState,
 } from '@/composables/use-url-state';
-import type { PrView } from '@/types/pr';
+import type { MergeMethod, PrView } from '@/types/pr';
+
+type MergeConfirmState =
+  | { status: 'closed' }
+  | { status: 'open'; pr: PrView; mergeMethod: MergeMethod };
 
 const {
   clientState,
@@ -194,13 +216,32 @@ const {
   inspector,
   syncStates,
   draftStates,
+  mergeStates,
   fetchSnapshot,
   syncPullRequest,
   togglePullDraft,
+  mergePullRequest,
   openInspector,
   closeInspector,
   setPollIntervalMs,
 } = useDashboardState();
+
+const mergeConfirm = ref<MergeConfirmState>({ status: 'closed' });
+
+function openMergeConfirm(pr: PrView, mergeMethod: MergeMethod): void {
+  mergeConfirm.value = { status: 'open', pr, mergeMethod };
+}
+
+function closeMergeConfirm(): void {
+  mergeConfirm.value = { status: 'closed' };
+}
+
+async function onConfirmMerge(pr: PrView, mergeMethod: MergeMethod): Promise<void> {
+  const merged = await mergePullRequest(pr, mergeMethod);
+  if (merged) {
+    closeMergeConfirm();
+  }
+}
 
 const { resolvedTheme, toggleTheme } = useTheme();
 const { view, bucket, q, repoSelection, drafts, resetFilters } = useUrlState();
@@ -344,7 +385,8 @@ function isEditableElement(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
 }
 
-const PROTECTED_INSPECTOR_SELECTOR = '.inspector-dialog, .pr-card, .waiting-item';
+const PROTECTED_INSPECTOR_SELECTOR =
+  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .merge-menu-popover';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {
@@ -360,7 +402,12 @@ function onGlobalPointerdown(event: PointerEvent): void {
 function onGlobalClick(event: MouseEvent): void {
   const startedInProtected = lastPointerDownProtected;
   lastPointerDownProtected = false;
-  if (!isDesktop.value || inspector.value.status === 'closed' || startedInProtected) {
+  if (
+    !isDesktop.value ||
+    inspector.value.status === 'closed' ||
+    mergeConfirm.value.status === 'open' ||
+    startedInProtected
+  ) {
     return;
   }
   if (!isProtectedInspectorTarget(event.target)) {
@@ -369,7 +416,7 @@ function onGlobalClick(event: MouseEvent): void {
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {
-  if (event.metaKey || event.ctrlKey || event.altKey) {
+  if (event.metaKey || event.ctrlKey || event.altKey || mergeConfirm.value.status === 'open') {
     return;
   }
 

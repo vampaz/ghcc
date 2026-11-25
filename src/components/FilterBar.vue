@@ -52,7 +52,7 @@
       @click="$emit('clearRepos')"
     >
       <span>{{ repoChipLabel }}</span>
-      <span aria-hidden="true">×</span>
+      <CarbonIcon name="close" :size="14" />
     </button>
 
     <button
@@ -63,7 +63,7 @@
       @click="$emit('update:bucket', '')"
     >
       <span>{{ bucketLabel }}</span>
-      <span aria-hidden="true">×</span>
+      <CarbonIcon name="close" :size="14" />
     </button>
 
     <button v-if="hasActiveFilters" type="button" class="clear-btn" @click="$emit('clear')">
@@ -74,6 +74,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import type { BucketFilter, RepoSelection, ViewFilter } from '@/composables/use-url-state';
 
 interface Props {

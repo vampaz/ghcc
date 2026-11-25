@@ -2,7 +2,9 @@
   <header class="app-header">
     <div class="header-left">
       <div class="brand-group">
-        <span class="brand-mark mono-num" aria-hidden="true">&gt;_</span>
+        <span class="brand-mark" aria-hidden="true">
+          <CarbonIcon name="terminal" :size="16" />
+        </span>
         <span class="brand-name">ghcc</span>
       </div>
 
@@ -64,7 +66,7 @@
         :aria-label="themeButtonLabel"
         @click="$emit('toggleTheme')"
       >
-        <span aria-hidden="true">{{ resolvedTheme === 'dark' ? '☀' : '☾' }}</span>
+        <CarbonIcon :name="resolvedTheme === 'dark' ? 'sun' : 'moon'" :size="15" />
         <span class="btn-label">{{ resolvedTheme === 'dark' ? 'Light' : 'Dark' }}</span>
       </button>
 
@@ -75,12 +77,12 @@
         aria-keyshortcuts="r"
         @click="onRefreshClick"
       >
-        <span
+        <CarbonIcon
+          name="renew"
+          :size="15"
           class="refresh-glyph"
           :class="{ spinning: clientState === 'refreshing' }"
-          aria-hidden="true"
-          >↻</span
-        >
+        />
         <span>Refresh</span>
       </button>
     </div>
@@ -89,6 +91,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import type { ClientUiState } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
 import type { RateLimitBucket, SnapshotState } from '@/types/pr';

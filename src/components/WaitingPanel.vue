@@ -53,6 +53,11 @@
                 class="loading-spinner"
                 aria-label="Syncing branch"
               ></progress>
+              <CarbonIcon
+                v-else
+                :name="getSyncState(pr.key).status === 'synced' ? 'checkmark' : 'renew'"
+                :size="12"
+              />
               <span>{{ syncButtonText(pr.key) }}</span>
             </button>
           </div>
@@ -73,6 +78,7 @@
 </template>
 
 <script setup lang="ts">
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
 import {
   IDLE_PR_DRAFT_STATE,

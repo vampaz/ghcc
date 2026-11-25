@@ -34,7 +34,8 @@
           rel="noopener noreferrer"
           class="warning-link"
         >
-          Authorize SSO ↗
+          <span>Authorize SSO</span>
+          <CarbonIcon name="launch" :size="13" />
         </a>
         <button
           v-if="serverState === 'auth-error' || serverState === 'fatal'"
@@ -51,6 +52,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import CarbonIcon from '@/components/CarbonIcon.vue';
 import type { RateLimitBucket, SnapshotState, SnapshotWarning, WarningCode } from '@/types/pr';
 import { formatResetCountdown } from '@/utils/format';
 
@@ -175,6 +177,9 @@ function severityFor(code: WarningCode): 'error' | 'warn' | 'info' {
 
 .warning-link,
 .retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
   min-height: 1.75rem;
   padding: 0.2rem 0.6rem;
   border-radius: 0.35rem;

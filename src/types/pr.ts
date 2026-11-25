@@ -203,3 +203,13 @@ export interface ToggleDraftResponse {
   ok: true;
   isDraft: boolean;
 }
+
+export type MergeMethod = 'squash' | 'merge';
+
+export interface MergePullResponse {
+  ok: true;
+  merged: true;
+  sha: string;
+  message: string;
+  mergeMethod: MergeMethod;
+}

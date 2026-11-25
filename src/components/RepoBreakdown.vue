@@ -60,7 +60,7 @@
           </span>
         </span>
         <span class="repo-health" :data-health="entry.health" :title="healthTitle(entry.health)">
-          <span aria-hidden="true">{{ healthGlyph(entry.health) }}</span>
+          <CarbonIcon :name="healthIcon(entry.health)" :size="15" />
           <span class="visually-hidden">{{ healthTitle(entry.health) }}</span>
         </span>
       </label>
@@ -70,6 +70,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import CarbonIcon, { type CarbonIconName } from '@/components/CarbonIcon.vue';
 import type { RepoSelection } from '@/composables/use-url-state';
 import type { PrView } from '@/types/pr';
 
@@ -182,17 +183,17 @@ function repoRowTitle(entry: RepoEntry): string {
   return `${entry.name}: ${activeLabel}`;
 }
 
-function healthGlyph(health: RepoHealth): string {
+function healthIcon(health: RepoHealth): CarbonIconName {
   if (health === 'failing') {
-    return '!';
+    return 'warning-filled';
   }
   if (health === 'pending') {
-    return '⏳';
+    return 'in-progress';
   }
   if (health === 'muted') {
-    return '–';
+    return 'subtract';
   }
-  return '✓';
+  return 'checkmark-filled';
 }
 
 function healthTitle(health: RepoHealth): string {
@@ -407,9 +408,9 @@ function healthTitle(health: RepoHealth): string {
 }
 
 .repo-health {
-  text-align: center;
-  font-size: 0.75rem;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--accent-emerald);
 }
 

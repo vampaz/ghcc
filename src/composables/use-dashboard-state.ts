@@ -1,5 +1,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import type {
+  MergeMethod,
+  MergePullResponse,
   PrDetailResponse,
   PrView,
   SnapshotResponse,
@@ -41,6 +43,49 @@ export type PrDraftEvent =
   | { type: 'RESET' };
 
 export const IDLE_PR_DRAFT_STATE: PrDraftState = { status: 'idle' };
+
+export type PrMergeState =
+  | { status: 'idle' }
+  | { status: 'merging'; mergeMethod: MergeMethod }
+  | { status: 'merged'; mergeMethod: MergeMethod; sha: string; message: string }
+  | { status: 'error'; mergeMethod: MergeMethod; error: string };
+
+export type PrMergeEvent =
+  | { type: 'MERGE_REQUEST'; mergeMethod: MergeMethod }
+  | { type: 'MERGE_SUCCEEDED'; mergeMethod: MergeMethod; sha: string; message: string }
+  | { type: 'MERGE_FAILED'; mergeMethod: MergeMethod; error: string }
+  | { type: 'RESET' };
+
+export const IDLE_PR_MERGE_STATE: PrMergeState = { status: 'idle' };
+
+export function transitionPrMergeState(current: PrMergeState, event: PrMergeEvent): PrMergeState {
+  if (event.type === 'RESET') {
+    return IDLE_PR_MERGE_STATE;
+  }
+  switch (current.status) {
+    case 'idle':
+    case 'error':
+      if (event.type === 'MERGE_REQUEST') {
+        return { status: 'merging', mergeMethod: event.mergeMethod };
+      }
+      return current;
+    case 'merging':
+      if (event.type === 'MERGE_SUCCEEDED') {
+        return {
+          status: 'merged',
+          mergeMethod: event.mergeMethod,
+          sha: event.sha,
+          message: event.message,
+        };
+      }
+      if (event.type === 'MERGE_FAILED') {
+        return { status: 'error', mergeMethod: event.mergeMethod, error: event.error };
+      }
+      return current;
+    case 'merged':
+      return current;
+  }
+}
 
 export function transitionPrDraftState(current: PrDraftState, event: PrDraftEvent): PrDraftState {
   if (event.type === 'RESET') {
@@ -114,6 +159,7 @@ export function useDashboardState(
   const announcement = ref<string>('');
   const syncStates = ref<Record<string, PrSyncState>>({});
   const draftStates = ref<Record<string, PrDraftState>>({});
+  const mergeStates = ref<Record<string, PrMergeState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -198,6 +244,47 @@ export function useDashboardState(
 
     if (changed) {
       draftStates.value = nextMap;
+    }
+  }
+
+  function getMergeState(prKey: string): PrMergeState {
+    return mergeStates.value[prKey] ?? IDLE_PR_MERGE_STATE;
+  }
+
+  function setMergeState(prKey: string, next: PrMergeState): void {
+    if (next.status === 'idle') {
+      if (!(prKey in mergeStates.value)) {
+        return;
+      }
+      const copy = { ...mergeStates.value };
+      delete copy[prKey];
+      mergeStates.value = copy;
+      return;
+    }
+    mergeStates.value = {
+      ...mergeStates.value,
+      [prKey]: next,
+    };
+  }
+
+  function reconcileMergeStates(data: SnapshotResponse): void {
+    const entries = Object.entries(mergeStates.value);
+    if (entries.length === 0) {
+      return;
+    }
+    const prKeys = new Set(data.pullRequests.map((pr) => pr.key));
+    let changed = false;
+    const nextMap: Record<string, PrMergeState> = { ...mergeStates.value };
+
+    for (const [key, state] of entries) {
+      if (state.status === 'idle' || !prKeys.has(key)) {
+        delete nextMap[key];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      mergeStates.value = nextMap;
     }
   }
 
@@ -310,6 +397,7 @@ export function useDashboardState(
       nowMs.value = Date.now();
       reconcileSyncStates(data);
       reconcileDraftStates(data);
+      reconcileMergeStates(data);
       announceSnapshot(data);
     } catch (error) {
       offlineMessage.value =
@@ -468,6 +556,94 @@ export function useDashboardState(
     }
   }
 
+  async function mergePullRequest(
+    pr: PrView,
+    mergeMethod: MergeMethod = 'squash',
+  ): Promise<boolean> {
+    const current = getMergeState(pr.key);
+    if (current.status === 'merging' || current.status === 'merged') {
+      return false;
+    }
+
+    setMergeState(pr.key, transitionPrMergeState(current, { type: 'MERGE_REQUEST', mergeMethod }));
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/merge`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            mergeMethod,
+            ...(pr.headRefOid ? { expectedHeadSha: pr.headRefOid } : {}),
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to merge pull request (HTTP ${response.status})`);
+      }
+
+      const data = (await response.json()) as MergePullResponse;
+      detailCache.delete(`${pr.key}@${pr.headRefOid}`);
+      setMergeState(
+        pr.key,
+        transitionPrMergeState(getMergeState(pr.key), {
+          type: 'MERGE_SUCCEEDED',
+          mergeMethod: data.mergeMethod,
+          sha: data.sha,
+          message: data.message,
+        }),
+      );
+
+      if (snapshot.value) {
+        const remaining = snapshot.value.pullRequests.filter((item) => item.key !== pr.key);
+        const counts = {
+          needsMe: remaining.filter((item) => item.bucket === 'needs-me').length,
+          ready: remaining.filter((item) => item.bucket === 'ready').length,
+          waiting: remaining.filter((item) => item.bucket === 'waiting').length,
+          draft: remaining.filter((item) => item.bucket === 'draft').length,
+        };
+        snapshot.value = {
+          ...snapshot.value,
+          counts,
+          pullRequests: remaining,
+        };
+      }
+
+      if (inspector.value.status !== 'closed' && inspector.value.key === pr.key) {
+        closeInspector();
+      }
+
+      const methodLabel = data.mergeMethod === 'merge' ? 'merge commit' : 'squash and merge';
+      announcement.value = `Merged ${pr.key} (${methodLabel}).`;
+
+      if (fetchInFlight) {
+        pendingRefreshAfterSync = true;
+      } else {
+        void fetchSnapshot(false);
+      }
+
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to merge pull request';
+      setMergeState(
+        pr.key,
+        transitionPrMergeState(getMergeState(pr.key), {
+          type: 'MERGE_FAILED',
+          mergeMethod,
+          error: message,
+        }),
+      );
+      announcement.value = `Failed to merge ${pr.key}: ${message}`;
+      return false;
+    }
+  }
+
   async function openInspector(pr: PrView): Promise<void> {
     const cacheKey = `${pr.key}@${pr.headRefOid}`;
     const cached = detailCache.get(cacheKey);
@@ -564,9 +740,11 @@ export function useDashboardState(
     inspector,
     syncStates,
     draftStates,
+    mergeStates,
     fetchSnapshot,
     syncPullRequest,
     togglePullDraft,
+    mergePullRequest,
     openInspector,
     closeInspector,
     setPollIntervalMs,
