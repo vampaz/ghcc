@@ -43,17 +43,13 @@
       <kbd v-if="!q" class="search-kbd" aria-hidden="true">/</kbd>
     </div>
 
-    <button
-      v-if="repoChipLabel"
-      type="button"
-      class="filter-chip repo-chip"
-      :title="repoChipTitle"
-      :aria-label="`Clear repository filter (${repoChipLabel})`"
-      @click="$emit('clearRepos')"
-    >
-      <span>{{ repoChipLabel }}</span>
-      <CarbonIcon name="close" :size="14" />
-    </button>
+    <RepoPicker
+      :pull-requests="pullRequests"
+      :repo-selection="repoSelection"
+      :include-drafts="drafts"
+      @toggle-repo="onToggleRepo"
+      @toggle-all="onToggleAll"
+    />
 
     <button
       v-if="bucket"
@@ -75,13 +71,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
+import RepoPicker from '@/components/RepoPicker.vue';
 import type { BucketFilter, RepoSelection, ViewFilter } from '@/composables/use-url-state';
+import type { PrView } from '@/types/pr';
 
 interface Props {
   view: ViewFilter;
   bucket: BucketFilter;
   q: string;
   repoSelection: RepoSelection;
+  pullRequests: PrView[];
   drafts: boolean;
   draftCount: number;
 }
@@ -92,7 +91,8 @@ const emit = defineEmits<{
   'update:view': [value: ViewFilter];
   'update:bucket': [value: BucketFilter];
   'update:q': [value: string];
-  clearRepos: [];
+  toggleRepo: [repo: string, allRepos: string[]];
+  toggleAll: [allRepos: string[]];
   'update:drafts': [value: boolean];
   clear: [];
 }>();
@@ -124,26 +124,6 @@ const bucketLabel = computed<string>(() => {
   }
 });
 
-const repoChipLabel = computed<string>(() => {
-  if (props.repoSelection.mode === 'all') {
-    return '';
-  }
-  if (props.repoSelection.mode === 'none') {
-    return 'No repos';
-  }
-  if (props.repoSelection.repos.length === 1) {
-    return compactRepo(props.repoSelection.repos[0]!);
-  }
-  return `${props.repoSelection.repos.length} repos`;
-});
-
-const repoChipTitle = computed<string | undefined>(() => {
-  if (props.repoSelection.mode === 'subset') {
-    return props.repoSelection.repos.join(', ');
-  }
-  return undefined;
-});
-
 const hasActiveFilters = computed<boolean>(() => {
   return (
     props.view !== 'all' ||
@@ -159,9 +139,12 @@ function onDraftsChange(event: Event): void {
   emit('update:drafts', input.checked);
 }
 
-function compactRepo(fullName: string): string {
-  const parts = fullName.split('/');
-  return parts[1] ?? fullName;
+function onToggleRepo(repo: string, allRepos: string[]): void {
+  emit('toggleRepo', repo, allRepos);
+}
+
+function onToggleAll(allRepos: string[]): void {
+  emit('toggleAll', allRepos);
 }
 
 function onBeforeInput(event: Event): void {

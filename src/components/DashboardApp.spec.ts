@@ -258,7 +258,8 @@ describe('DashboardApp', () => {
     expect(wrapper.find('#waiting-heading').exists()).toBe(true);
     expect(wrapper.findAll('.action-queue .tag[data-tone="stale"]')).toHaveLength(1);
 
-    // Filter repositories via checkboxes: all start checked, unchecking one filters it out and updates KPIs
+    // Filter repositories via the top-bar dropdown: all start checked, unchecking one filters it out and updates KPIs
+    await wrapper.find('.repo-picker-trigger').trigger('click');
     const toggleAll = wrapper.find<HTMLInputElement>('#toggle-all-repos');
     expect(toggleAll.element.checked).toBe(true);
     expect(toggleAll.element.indeterminate).toBe(false);
@@ -269,12 +270,12 @@ describe('DashboardApp', () => {
       .find<HTMLInputElement>('input[type="checkbox"]');
     await webAppCheckbox.setValue(false);
     expect(window.location.search).toContain('repos=');
-    expect(wrapper.find('.repo-chip').exists()).toBe(true);
+    expect(wrapper.find('.repo-picker-trigger').text()).toContain('3 repos');
     expect(toggleAll.element.checked).toBe(false);
     expect(toggleAll.element.indeterminate).toBe(true);
     // Scoped KPI: Ready to Merge updates from 1 to 0 when acme/web-app is unchecked
     expect(wrapper.findAll('.kpi-tile')[1]!.find('.kpi-value').text()).toBe('0');
-    await wrapper.find('.repo-chip').trigger('click');
+    await toggleAll.setValue(true);
     expect(toggleAll.element.checked).toBe(true);
     expect(toggleAll.element.indeterminate).toBe(false);
 
@@ -671,7 +672,7 @@ describe('DashboardApp', () => {
     }
   });
 
-  it('excludes drafts from CI Health counts and ci-failing filter, and shows active-only counts in By Repository', async () => {
+  it('excludes drafts from CI Health counts and ci-failing filter, and shows active-only counts in the repository dropdown', async () => {
     const draftFailing = makePrView({
       key: 'acme/core-api#199',
       number: 199,
@@ -711,7 +712,8 @@ describe('DashboardApp', () => {
     expect(wrapper.find('.action-queue').text()).toContain('acme/core-api#101');
     expect(wrapper.find('.action-queue').text()).not.toContain('acme/core-api#199');
 
-    // By Repository shows active count (1) + draft note (+1d) for acme/core-api when drafts excluded
+    // Repository dropdown shows active count (1) + draft note (+1d) for acme/core-api when drafts excluded
+    await wrapper.find('.repo-picker-trigger').trigger('click');
     const coreRepoRow = wrapper.findAll('.repo-row').find((row) => row.text().includes('core-api'));
     expect(coreRepoRow?.text()).toContain('1');
     expect(coreRepoRow?.text()).toContain('+1d');
@@ -861,18 +863,19 @@ describe('DashboardApp', () => {
     const wrapper = mountWithDeps(DashboardApp);
     await flushPromises();
 
+    await wrapper.find('.repo-picker-trigger').trigger('click');
     const toggleAll = wrapper.find<HTMLInputElement>('#toggle-all-repos');
     expect(toggleAll.element.checked).toBe(true);
 
-    // Uncheck all via header toggle -> 0 PRs shown, 'No repos' chip, ?repos=none
+    // Uncheck all via header toggle -> 0 PRs shown, 'No repos' trigger, ?repos=none
     await toggleAll.setValue(false);
     expect(toggleAll.element.checked).toBe(false);
     expect(toggleAll.element.indeterminate).toBe(false);
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(0);
-    expect(wrapper.find('.repo-chip').text()).toContain('No repos');
+    expect(wrapper.find('.repo-picker-trigger').text()).toContain('No repos');
     expect(window.location.search).toContain('repos=none');
 
-    // Check only core-api and web-app -> shows both PRs and '2 repos' chip
+    // Check only core-api and web-app -> shows both PRs and '2 repos' trigger
     const coreCheck = wrapper
       .findAll('.repo-row')
       .find((r) => r.text().includes('core-api'))!
@@ -884,18 +887,18 @@ describe('DashboardApp', () => {
 
     await coreCheck.setValue(true);
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
-    expect(wrapper.find('.repo-chip').text()).toContain('core-api');
+    expect(wrapper.find('.repo-picker-trigger').text()).toContain('core-api');
     expect(toggleAll.element.indeterminate).toBe(true);
 
     await webCheck.setValue(true);
     expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(2);
-    expect(wrapper.find('.repo-chip').text()).toContain('2 repos');
+    expect(wrapper.find('.repo-picker-trigger').text()).toContain('2 repos');
 
     // Clicking header toggle while indeterminate restores all repos
     await toggleAll.setValue(true);
     expect(toggleAll.element.checked).toBe(true);
     expect(toggleAll.element.indeterminate).toBe(false);
-    expect(wrapper.find('.repo-chip').exists()).toBe(false);
+    expect(wrapper.find('.repo-picker-trigger').text()).toContain('All repos');
     expect(window.location.search).toBe('');
 
     wrapper.unmount();

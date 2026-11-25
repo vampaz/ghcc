@@ -43,18 +43,20 @@
           :bucket="bucket"
           :q="q"
           :repo-selection="repoSelection"
+          :pull-requests="ownershipFilteredPulls"
           :drafts="drafts"
           :draft-count="draftPullRequests.length"
           @update:view="view = $event"
           @update:bucket="bucket = $event"
           @update:q="q = $event"
-          @clear-repos="repoSelection = ALL_REPOS_SELECTION"
+          @toggle-repo="onToggleRepo"
+          @toggle-all="onToggleAllRepos"
           @update:drafts="drafts = $event"
           @clear="resetFilters"
         />
       </div>
 
-      <div class="dashboard-grid">
+      <div class="dashboard-grid" :class="{ 'single-column': !showWaitingRail }">
         <ActionQueue
           :pull-requests="primaryQueuePulls"
           :selected-key="activeKey"
@@ -99,9 +101,8 @@
           </template>
         </ActionQueue>
 
-        <aside class="context-rail app-scroll" aria-label="Waiting queue and repositories">
+        <aside v-if="showWaitingRail" class="context-rail app-scroll" aria-label="Waiting queue">
           <WaitingPanel
-            v-if="bucket === '' && view !== 'team'"
             :pull-requests="waitingPullRequests"
             :selected-key="activeKey"
             :now-ms="nowMs"
@@ -134,14 +135,6 @@
               />
             </template>
           </WaitingPanel>
-
-          <RepoBreakdown
-            :pull-requests="ownershipFilteredPulls"
-            :repo-selection="repoSelection"
-            :include-drafts="drafts"
-            @toggle-repo="onToggleRepo"
-            @toggle-all="onToggleAllRepos"
-          />
         </aside>
       </div>
     </main>
@@ -206,13 +199,11 @@ import FilterBar from '@/components/FilterBar.vue';
 import KpiStrip from '@/components/KpiStrip.vue';
 import MergeConfirmDialog from '@/components/MergeConfirmDialog.vue';
 import PrInspector from '@/components/PrInspector.vue';
-import RepoBreakdown from '@/components/RepoBreakdown.vue';
 import WaitingPanel from '@/components/WaitingPanel.vue';
 import WarningStrip from '@/components/WarningStrip.vue';
 import { useDashboardState } from '@/composables/use-dashboard-state';
 import { useTheme } from '@/composables/use-theme';
 import {
-  ALL_REPOS_SELECTION,
   type BucketFilter,
   toggleAllReposSelection,
   toggleRepoInSelection,
@@ -364,6 +355,8 @@ const waitingPullRequests = computed<PrView[]>(() =>
 const draftPullRequests = computed<PrView[]>(() =>
   filteredBasePulls.value.filter((pr) => pr.bucket === 'draft'),
 );
+
+const showWaitingRail = computed<boolean>(() => bucket.value === '' && view.value !== 'team');
 
 const hasActiveFilters = computed<boolean>(() => {
   return (
@@ -602,6 +595,10 @@ onUnmounted(() => {
   align-items: stretch;
   gap: 1rem;
   overflow: clip;
+}
+
+.dashboard-grid.single-column {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .context-rail {
