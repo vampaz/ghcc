@@ -65,6 +65,7 @@ export interface RawPullRequest {
   createdAt: string;
   updatedAt: string;
   baseRefName: string;
+  baseRefOid?: string;
   headRefName: string;
   headRefOid: string;
   additions: number;

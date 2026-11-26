@@ -63,4 +63,27 @@ describe('StateStore', () => {
     // New headRefOid resets counter.
     expect(await store.getRecentProbeCount('acme/app#5', 'sha-2', t0 + 30 * 60_000)).toBe(0);
   });
+
+  it('persists batched draft branch comparisons and reloads them from disk', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ghcc-draft-cmp-'));
+    dirs.push(dir);
+    const filePath = join(dir, 'state.json');
+
+    const store = new StateStore(filePath);
+    await store.setDraftComparisons({
+      'acme/app#42': {
+        baseRefOid: '1111111111111111111111111111111111111111',
+        headRefOid: '2222222222222222222222222222222222222222',
+        behindBy: 7,
+      },
+    });
+
+    const reloaded = new StateStore(filePath);
+    expect(await reloaded.getDraftComparison('acme/app#42')).toEqual({
+      baseRefOid: '1111111111111111111111111111111111111111',
+      headRefOid: '2222222222222222222222222222222222222222',
+      behindBy: 7,
+    });
+    expect(await reloaded.getDraftComparison('acme/app#999')).toBeNull();
+  });
 });

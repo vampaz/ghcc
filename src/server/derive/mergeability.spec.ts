@@ -196,4 +196,95 @@ describe('derive/mergeability', () => {
       checkedAt: '2026-11-24T12:00:00.000Z',
     });
   });
+
+  it('preserves behind merge state for non-conflicting draft PRs while keeping other drafts as draft', async () => {
+    const store = await makeStore();
+    const probeFn = vi.fn<ProbeFn>().mockResolvedValueOnce({
+      status: 'ok',
+      mergeable: true,
+      mergeableState: 'behind',
+      etag: '"etag-draft-behind"',
+      coreRateLimit: null,
+    });
+
+    const behindDraft = await resolveMergeability(
+      makeBaseRawPr({
+        id: 'PR_draft_behind',
+        number: 601,
+        isDraft: true,
+        headRefOid: 'sha-draft-behind',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'BEHIND',
+      }),
+      { stateStore: store, probeFn, nowMs: FIXTURE_NOW_MS },
+    );
+    expect(behindDraft.merge.state).toBe('behind');
+    expect(behindDraft.merge.source).toBe('fresh');
+
+    const conflictingBehindDraft = await resolveMergeability(
+      makeBaseRawPr({
+        id: 'PR_draft_conflict',
+        number: 602,
+        isDraft: true,
+        headRefOid: 'sha-draft-conflict',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'BEHIND',
+      }),
+      { stateStore: store, probeFn, nowMs: FIXTURE_NOW_MS },
+    );
+    expect(conflictingBehindDraft.merge.state).toBe('draft');
+
+    const upToDateDraft = await resolveMergeability(
+      makeBaseRawPr({
+        id: 'PR_draft_clean',
+        number: 603,
+        isDraft: true,
+        headRefOid: 'sha-draft-clean',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'BLOCKED',
+      }),
+      { stateStore: store, probeFn, nowMs: FIXTURE_NOW_MS },
+    );
+    expect(upToDateDraft.merge.state).toBe('draft');
+
+    const probedBehindDraft = await resolveMergeability(
+      makeBaseRawPr({
+        id: 'PR_draft_probe',
+        number: 604,
+        isDraft: true,
+        headRefOid: 'sha-draft-probe',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'UNKNOWN',
+      }),
+      { stateStore: store, probeFn, nowMs: FIXTURE_NOW_MS },
+    );
+    expect(probedBehindDraft.merge.state).toBe('behind');
+    expect(probedBehindDraft.merge.source).toBe('probe');
+
+    const comparedBehindDraft = await resolveMergeability(
+      makeBaseRawPr({
+        id: 'PR_draft_compared_behind',
+        number: 605,
+        isDraft: true,
+        headRefOid: 'sha-draft-compared',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'BLOCKED',
+      }),
+      { stateStore: store, probeFn, nowMs: FIXTURE_NOW_MS, isBehindBase: true },
+    );
+    expect(comparedBehindDraft.merge.state).toBe('behind');
+
+    const dirtyComparedDraft = await resolveMergeability(
+      makeBaseRawPr({
+        id: 'PR_draft_dirty_compared',
+        number: 606,
+        isDraft: true,
+        headRefOid: 'sha-draft-dirty',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'DIRTY',
+      }),
+      { stateStore: store, nowMs: FIXTURE_NOW_MS, isBehindBase: true },
+    );
+    expect(dirtyComparedDraft.merge.state).toBe('draft');
+  });
 });

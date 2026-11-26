@@ -20,10 +20,17 @@ export interface CachedSnapshotEntry {
   snapshot: SnapshotResponse;
 }
 
+export interface CachedDraftComparisonEntry {
+  baseRefOid: string;
+  headRefOid: string;
+  behindBy: number;
+}
+
 export interface PersistedState {
   version: 1;
   mergeability: Record<string, CachedMergeabilityEntry>;
   probeCounters: Record<string, ProbeCounterEntry>;
+  draftComparisons?: Record<string, CachedDraftComparisonEntry>;
   lastSnapshot?: CachedSnapshotEntry;
 }
 
@@ -31,6 +38,7 @@ const EMPTY_STATE: PersistedState = {
   version: 1,
   mergeability: {},
   probeCounters: {},
+  draftComparisons: {},
 };
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.cache/state.json');
@@ -57,6 +65,7 @@ export class StateStore {
           version: 1,
           mergeability: { ...parsed.mergeability },
           probeCounters: { ...parsed.probeCounters },
+          draftComparisons: parsed.draftComparisons ? { ...parsed.draftComparisons } : {},
           ...(parsed.lastSnapshot?.snapshot && typeof parsed.lastSnapshot.savedAt === 'string'
             ? { lastSnapshot: parsed.lastSnapshot }
             : {}),
@@ -71,6 +80,7 @@ export class StateStore {
       version: 1,
       mergeability: {},
       probeCounters: {},
+      draftComparisons: {},
     };
     return this.state;
   }
@@ -113,6 +123,24 @@ export class StateStore {
     await this.persist();
   }
 
+  async getDraftComparison(prKey: string): Promise<CachedDraftComparisonEntry | null> {
+    const state = await this.load();
+    return state.draftComparisons?.[prKey] ?? null;
+  }
+
+  async setDraftComparisons(entries: Record<string, CachedDraftComparisonEntry>): Promise<void> {
+    const keys = Object.keys(entries);
+    if (keys.length === 0) {
+      return;
+    }
+    const state = await this.load();
+    state.draftComparisons = {
+      ...state.draftComparisons,
+      ...entries,
+    };
+    await this.persist();
+  }
+
   async getLastSnapshot(): Promise<CachedSnapshotEntry | null> {
     const state = await this.load();
     return state.lastSnapshot ?? null;
@@ -129,6 +157,7 @@ export class StateStore {
       ...EMPTY_STATE,
       mergeability: {},
       probeCounters: {},
+      draftComparisons: {},
     };
     await this.persist();
   }

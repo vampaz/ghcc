@@ -17,6 +17,7 @@ export interface MergeabilityContext {
   ) => Promise<ProbeMergeabilityResult>;
   nowMs?: number;
   probeBudget?: { remaining: number };
+  isBehindBase?: boolean;
 }
 
 export interface ResolvedMergeability {
@@ -47,11 +48,19 @@ function mapMergeState(
   raw: RawPullRequest,
   resolvedMergeable: RawMergeable,
   effectiveStatus: RawMergeStateStatus,
+  isBehindBase?: boolean,
 ): PrMergeInfo['state'] {
   if (raw.mergeQueueEntry) {
     return 'queued';
   }
   if (raw.isDraft) {
+    if (
+      resolvedMergeable !== 'CONFLICTING' &&
+      effectiveStatus !== 'DIRTY' &&
+      (effectiveStatus === 'BEHIND' || isBehindBase === true)
+    ) {
+      return 'behind';
+    }
     return 'draft';
   }
   if (resolvedMergeable === 'CONFLICTING' || effectiveStatus === 'DIRTY') {
@@ -95,7 +104,7 @@ export async function resolveMergeability(
     });
     return {
       merge: {
-        state: mapMergeState(raw, raw.mergeable, raw.mergeStateStatus),
+        state: mapMergeState(raw, raw.mergeable, raw.mergeStateStatus, ctx.isBehindBase),
         source: 'fresh',
         checkedAt: nowIso,
       },
@@ -114,7 +123,7 @@ export async function resolveMergeability(
         normalizeRestMergeableState(sameHeadCache.mergeStateStatus) ?? raw.mergeStateStatus;
       return {
         merge: {
-          state: mapMergeState(raw, sameHeadCache.mergeable, effectiveStatus),
+          state: mapMergeState(raw, sameHeadCache.mergeable, effectiveStatus, ctx.isBehindBase),
           source: 'cached',
           checkedAt: sameHeadCache.checkedAt,
         },
@@ -142,7 +151,7 @@ export async function resolveMergeability(
             normalizeRestMergeableState(sameHeadCache.mergeStateStatus) ?? raw.mergeStateStatus;
           return {
             merge: {
-              state: mapMergeState(raw, sameHeadCache.mergeable, effectiveStatus),
+              state: mapMergeState(raw, sameHeadCache.mergeable, effectiveStatus, ctx.isBehindBase),
               source: 'cached',
               checkedAt: nowIso,
             },
@@ -164,7 +173,7 @@ export async function resolveMergeability(
           });
           return {
             merge: {
-              state: mapMergeState(raw, resolvedMergeable, effectiveStatus),
+              state: mapMergeState(raw, resolvedMergeable, effectiveStatus, ctx.isBehindBase),
               source: 'probe',
               checkedAt: nowIso,
             },
@@ -181,7 +190,7 @@ export async function resolveMergeability(
       normalizeRestMergeableState(sameHeadCache.mergeStateStatus) ?? raw.mergeStateStatus;
     return {
       merge: {
-        state: mapMergeState(raw, sameHeadCache.mergeable, effectiveStatus),
+        state: mapMergeState(raw, sameHeadCache.mergeable, effectiveStatus, ctx.isBehindBase),
         source: 'cached',
         checkedAt: sameHeadCache.checkedAt,
       },
@@ -192,7 +201,7 @@ export async function resolveMergeability(
   // Rule 4: Unknown -> render as `merge ?`.
   return {
     merge: {
-      state: mapMergeState(raw, 'UNKNOWN', raw.mergeStateStatus),
+      state: mapMergeState(raw, 'UNKNOWN', raw.mergeStateStatus, ctx.isBehindBase),
       source: 'unknown',
     },
     effectiveMergeStateStatus: raw.mergeStateStatus,

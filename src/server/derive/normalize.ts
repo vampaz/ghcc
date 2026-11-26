@@ -49,6 +49,7 @@ export interface NormalizeOptions {
     etag?: string,
   ) => Promise<ProbeMergeabilityResult>;
   nowMs?: number;
+  draftBehindByKey?: ReadonlyMap<string, boolean>;
 }
 
 function mapReviewDecision(raw: RawReviewDecision): PrReviewInfo['decision'] {
@@ -292,6 +293,7 @@ export async function normalizePullRequests(
       probeFn: options.probeFn,
       nowMs,
       probeBudget,
+      isBehindBase: options.draftBehindByKey?.get(key),
     });
     if (resolvedMerge.merge.source === 'cached') {
       hasCachedMergeability = true;

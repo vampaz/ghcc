@@ -33,6 +33,7 @@ fragment PrFields on PullRequest {
   createdAt
   updatedAt
   baseRefName
+  baseRefOid
   headRefName
   headRefOid
   additions
@@ -531,6 +532,20 @@ export type ProbeMergeabilityResult =
       coreRateLimit: RateLimitBucket | null;
     };
 
+export interface DraftBranchCompareItem {
+  key: string;
+  owner: string;
+  repo: string;
+  baseRefName: string;
+  baseRefOid: string;
+  headRefOid: string;
+}
+
+export interface DraftBranchCompareResult {
+  behindByByKey: Record<string, number>;
+  rateLimit: RateLimitBucket | null;
+}
+
 export interface GitHubClient {
   fetchAuthoredPulls(options?: { maxPages?: number }): Promise<AuthoredPullsResult>;
   fetchReviewQueue(): Promise<ReviewQueueResult>;
@@ -545,6 +560,7 @@ export interface GitHubClient {
     number: number,
     etag?: string,
   ): Promise<ProbeMergeabilityResult>;
+  compareDraftBranches?(items: DraftBranchCompareItem[]): Promise<DraftBranchCompareResult>;
   fetchPullDetail(owner: string, repo: string, number: number): Promise<PrDetailResponse>;
   updatePullBranch(
     owner: string,
@@ -1138,6 +1154,131 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         etag: body.mergeable !== null && body.mergeable !== undefined ? respEtag : undefined,
         coreRateLimit,
       };
+    },
+
+    async compareDraftBranches(items: DraftBranchCompareItem[]): Promise<DraftBranchCompareResult> {
+      const MAX_COMPARE_BATCH = 25;
+      const groups = new Map<
+        string,
+        { owner: string; repo: string; baseRefName: string; items: DraftBranchCompareItem[] }
+      >();
+
+      for (const item of items) {
+        if (
+          !SAFE_SEGMENT_RE.test(item.owner) ||
+          !SAFE_SEGMENT_RE.test(item.repo) ||
+          !item.baseRefName.trim() ||
+          !SAFE_SHA_RE.test(item.headRefOid)
+        ) {
+          continue;
+        }
+        const groupKey = `${item.owner}/${item.repo}\0${item.baseRefName}`;
+        let group = groups.get(groupKey);
+        if (!group) {
+          group = {
+            owner: item.owner,
+            repo: item.repo,
+            baseRefName: item.baseRefName,
+            items: [],
+          };
+          groups.set(groupKey, group);
+        }
+        group.items.push(item);
+      }
+
+      const chunks: Array<{
+        owner: string;
+        repo: string;
+        baseRefName: string;
+        items: DraftBranchCompareItem[];
+      }> = [];
+      for (const group of groups.values()) {
+        for (let offset = 0; offset < group.items.length; offset += MAX_COMPARE_BATCH) {
+          chunks.push({
+            owner: group.owner,
+            repo: group.repo,
+            baseRefName: group.baseRefName,
+            items: group.items.slice(offset, offset + MAX_COMPARE_BATCH),
+          });
+        }
+      }
+
+      const behindByByKey: Record<string, number> = {};
+      let latestRateLimit: RateLimitBucket | null = null;
+
+      if (chunks.length === 0) {
+        return { behindByByKey, rateLimit: latestRateLimit };
+      }
+
+      interface CompareBatchData {
+        rateLimit?: RateLimitBucket;
+        repository?: {
+          ref?: Record<string, { behindBy?: number | null } | null> | null;
+        } | null;
+      }
+
+      const queue = [...chunks];
+      const concurrency = Math.min(2, queue.length);
+
+      async function runWorker(): Promise<void> {
+        while (queue.length > 0) {
+          const chunk = queue.shift();
+          if (!chunk) {
+            continue;
+          }
+          const varDefs = ['$owner: String!', '$repo: String!', '$baseRef: String!'];
+          const selections: string[] = [];
+          const variables: Record<string, unknown> = {
+            owner: chunk.owner,
+            repo: chunk.repo,
+            baseRef: `refs/heads/${chunk.baseRefName}`,
+          };
+          for (let i = 0; i < chunk.items.length; i++) {
+            varDefs.push(`$h${i}: String!`);
+            selections.push(`c${i}: compare(headRef: $h${i}) { behindBy }`);
+            variables[`h${i}`] = chunk.items[i]!.headRefOid;
+          }
+          const query = `
+            query CompareDraftBranches(${varDefs.join(', ')}) {
+              rateLimit {
+                remaining
+                limit
+                resetAt
+              }
+              repository(owner: $owner, name: $repo) {
+                ref(qualifiedName: $baseRef) {
+                  ${selections.join('\n')}
+                }
+              }
+            }
+          `;
+          try {
+            const { data, headerRateLimit } = await executeGraphql<CompareBatchData>(
+              query,
+              variables,
+              { strictErrors: false },
+            );
+            latestRateLimit = data.rateLimit ?? headerRateLimit ?? latestRateLimit;
+            const refObj = data.repository?.ref;
+            if (!refObj) {
+              continue;
+            }
+            for (let i = 0; i < chunk.items.length; i++) {
+              const behindBy = refObj[`c${i}`]?.behindBy;
+              if (typeof behindBy === 'number' && Number.isFinite(behindBy)) {
+                behindByByKey[chunk.items[i]!.key] = behindBy;
+              }
+            }
+          } catch (error) {
+            if (error instanceof GitHubAuthError || error instanceof GitHubRateLimitError) {
+              throw error;
+            }
+          }
+        }
+      }
+
+      await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+      return { behindByByKey, rateLimit: latestRateLimit };
     },
 
     invalidatePullDetailCache(owner: string, repo: string, number: number): void {

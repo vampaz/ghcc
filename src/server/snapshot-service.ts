@@ -7,9 +7,14 @@ import {
   normalizePullRequests,
 } from '@/server/derive/normalize';
 import type { RawPullRequest } from '@/server/derive/types';
-import { GitHubAuthError, GitHubRateLimitError, type GitHubClient } from '@/server/github-client';
+import {
+  GitHubAuthError,
+  GitHubRateLimitError,
+  type DraftBranchCompareItem,
+  type GitHubClient,
+} from '@/server/github-client';
 import { sanitizeErrorMessage } from '@/server/redact';
-import type { StateStore } from '@/server/state-store';
+import type { CachedDraftComparisonEntry, StateStore } from '@/server/state-store';
 import type {
   RateLimitBucket,
   SchedulerState,
@@ -412,12 +417,84 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       }
 
       const merged = mergeRawPullRequests(authored.pullRequests, reviewPulls, repoPulls);
+      const draftBehindByKey = new Map<string, boolean>();
+      const uncachedDrafts: DraftBranchCompareItem[] = [];
+
+      for (const { raw } of merged) {
+        if (
+          !raw.isDraft ||
+          raw.mergeQueueEntry ||
+          raw.mergeable === 'CONFLICTING' ||
+          raw.mergeStateStatus === 'BEHIND' ||
+          raw.mergeStateStatus === 'DIRTY' ||
+          !raw.baseRefOid ||
+          !raw.headRefOid
+        ) {
+          continue;
+        }
+        const key = `${raw.repository.nameWithOwner}#${raw.number}`;
+        if (raw.headRefOid === raw.baseRefOid) {
+          draftBehindByKey.set(key, false);
+          continue;
+        }
+        const cached = await deps.stateStore.getDraftComparison(key);
+        if (
+          cached &&
+          cached.baseRefOid === raw.baseRefOid &&
+          cached.headRefOid === raw.headRefOid
+        ) {
+          draftBehindByKey.set(key, cached.behindBy > 0);
+          continue;
+        }
+        const [owner, repo] = raw.repository.nameWithOwner.split('/');
+        if (owner && repo) {
+          uncachedDrafts.push({
+            key,
+            owner,
+            repo,
+            baseRefName: raw.baseRefName,
+            baseRefOid: raw.baseRefOid,
+            headRefOid: raw.headRefOid,
+          });
+        }
+      }
+
+      if (uncachedDrafts.length > 0 && deps.githubClient.compareDraftBranches) {
+        try {
+          const compared = await deps.githubClient.compareDraftBranches(uncachedDrafts);
+          if (compared.rateLimit) {
+            lastGraphqlLimit = compared.rateLimit;
+          }
+          const toPersist: Record<string, CachedDraftComparisonEntry> = {};
+          for (const item of uncachedDrafts) {
+            const behindBy = compared.behindByByKey[item.key];
+            if (typeof behindBy === 'number' && Number.isFinite(behindBy)) {
+              draftBehindByKey.set(item.key, behindBy > 0);
+              toPersist[item.key] = {
+                baseRefOid: item.baseRefOid,
+                headRefOid: item.headRefOid,
+                behindBy,
+              };
+            }
+          }
+          await deps.stateStore.setDraftComparisons(toPersist).catch(() => {
+            // Best-effort cache persistence; ignore disk errors.
+          });
+        } catch (error) {
+          if (error instanceof GitHubAuthError) {
+            throw error;
+          }
+          // Best-effort draft comparison; keep snapshot healthy on transient or rate-limit errors.
+        }
+      }
+
       let probeErrored = false;
 
       const normalized = await normalizePullRequests(merged, {
         viewerLogin: lastLogin,
         stateStore: deps.stateStore,
         nowMs: startMs,
+        draftBehindByKey,
         probeFn: async (owner, repo, number, etag) => {
           try {
             const res = await deps.githubClient.probeMergeability(owner, repo, number, etag);

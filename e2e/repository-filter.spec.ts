@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { SnapshotResponse } from '../src/types/pr';
-import { makePrDetail, makeSnapshot } from './fixtures/snapshot';
+import { makePrDetail, makePrView, makeSnapshot } from './fixtures/snapshot';
 
 async function mockApi(page: Page, snapshot: SnapshotResponse = makeSnapshot()): Promise<void> {
   await page.route('**/api/**', async (route) => {
@@ -193,4 +193,121 @@ test('renders cleanly on mobile without overflow, duplicate banner landmarks, or
       return box ? box.y >= 0 && box.y < 844 : false;
     })
     .toBe(true);
+});
+
+test('shows Sync on behind-base draft PRs in the queue and inspector, but not up-to-date drafts', async ({
+  page,
+}) => {
+  const base = makeSnapshot();
+  const behindDraft = makePrView({
+    key: 'acme/docs#404',
+    repo: 'docs',
+    repository: 'acme/docs',
+    number: 404,
+    title: 'wip: architecture diagram',
+    url: 'https://github.com/acme/docs/pull/404',
+    isDraft: true,
+    bucket: 'draft',
+    myAction: 'none',
+    blockers: ['draft', 'behind-base'],
+    ci: { state: 'none', passing: 0, failing: [], pending: 0, hiddenCount: 0 },
+    merge: { state: 'behind', source: 'fresh', checkedAt: '2026-11-24T12:00:00.000Z' },
+    blockerSummary: 'Draft · No CI checks · behind base · no review requested',
+  });
+  const upToDateDraft = makePrView({
+    key: 'acme/docs#405',
+    repo: 'docs',
+    repository: 'acme/docs',
+    number: 405,
+    title: 'wip: deployment checklist',
+    url: 'https://github.com/acme/docs/pull/405',
+    isDraft: true,
+    bucket: 'draft',
+    myAction: 'none',
+    blockers: ['draft'],
+    ci: { state: 'none', passing: 0, failing: [], pending: 0, hiddenCount: 0 },
+    merge: { state: 'draft', source: 'fresh', checkedAt: '2026-11-24T12:00:00.000Z' },
+    blockerSummary: 'Draft · No CI checks · no review requested',
+  });
+
+  await mockApi(
+    page,
+    makeSnapshot({
+      counts: { ...base.counts, draft: 2 },
+      pullRequests: [
+        ...base.pullRequests.filter((pr) => pr.key !== 'acme/docs#404'),
+        behindDraft,
+        upToDateDraft,
+      ],
+    }),
+  );
+  await page.goto('/');
+
+  await page.locator('#include-drafts').check();
+
+  const behindCard = page.locator('.action-queue .pr-card', { hasText: 'acme/docs#404' });
+  const upToDateCard = page.locator('.action-queue .pr-card', { hasText: 'acme/docs#405' });
+
+  await expect(behindCard.locator('.sync-btn')).toBeVisible();
+  await expect(behindCard.locator('.sync-btn')).toContainText('Sync');
+  await expect(upToDateCard.locator('.sync-btn')).toHaveCount(0);
+
+  await behindCard.locator('.pr-card-trigger').click();
+  const inspector = page.locator('.inspector-dialog');
+  await expect(inspector).toHaveClass(/open/);
+  await expect(inspector.locator('.sync-action-btn')).toBeVisible();
+  await expect(inspector.locator('.sync-action-btn')).toContainText('Sync with main');
+  await expect(inspector.getByText('Merge pull request')).toHaveCount(0);
+
+  await upToDateCard.locator('.pr-card-trigger').click();
+  await expect(inspector.locator('.sync-action-btn')).toHaveCount(0);
+
+  let synced = false;
+  let receivedExpectedSha: string | undefined;
+  await page.route('**/api/pull/acme/docs/404/update-branch', async (route) => {
+    const body = route.request().postDataJSON() as { expectedHeadSha?: string };
+    receivedExpectedSha = body.expectedHeadSha;
+    synced = true;
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, message: 'Updating pull request branch.' }),
+    });
+  });
+  await page.route('**/api/snapshot', async (route) => {
+    const updatedDraft = synced
+      ? {
+          ...behindDraft,
+          headRefOid: 'oid-404-synced',
+          blockers: ['draft'] as typeof behindDraft.blockers,
+          merge: {
+            state: 'draft' as const,
+            source: 'fresh' as const,
+            checkedAt: '2026-11-24T12:05:00.000Z',
+          },
+          blockerSummary: 'Draft · No CI checks · no review requested',
+        }
+      : behindDraft;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { etag: synced ? '"e2e-snapshot-synced"' : '"e2e-snapshot"' },
+      body: JSON.stringify(
+        makeSnapshot({
+          counts: { ...base.counts, draft: 2 },
+          pullRequests: [
+            ...base.pullRequests.filter((pr) => pr.key !== 'acme/docs#404'),
+            updatedDraft,
+            upToDateDraft,
+          ],
+        }),
+      ),
+    });
+  });
+
+  await behindCard.locator('.sync-btn').click();
+  await expect.poll(() => receivedExpectedSha).toBe('oid-101');
+  await expect(behindCard.locator('.sync-btn')).toContainText('Synced');
+  await expect(behindCard.locator('.sync-btn')).toHaveAttribute('aria-disabled', 'true');
+  await expect(behindCard.locator('.sync-btn')).toHaveCount(0, { timeout: 5000 });
 });

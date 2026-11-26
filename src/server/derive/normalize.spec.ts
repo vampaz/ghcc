@@ -27,6 +27,7 @@ import {
   fixtureTeamReviewRequest,
   fixtureTruncatedFailingCi,
   fixtureUnknownMergeable,
+  makeBaseRawPr,
 } from '@/server/derive/__fixtures__/pull-requests';
 import { StateStore } from '@/server/state-store';
 
@@ -183,5 +184,36 @@ describe('derive/normalize fixtures', () => {
       waiting: 0,
       draft: 0,
     });
+  });
+
+  it('keeps behind-base drafts in the draft bucket while exposing merge.state behind and behind-base blocker', async () => {
+    const store = await makeStore();
+    const behindDraft = makeBaseRawPr({
+      id: 'PR_behind_draft',
+      number: 299,
+      isDraft: true,
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'BEHIND',
+      reviewDecision: null,
+      latestReviews: { nodes: [] },
+      reviewRequests: { nodes: [] },
+    });
+    const merged = mergeRawPullRequests([behindDraft], []);
+
+    const { pullRequests } = await normalizePullRequests(merged, {
+      viewerLogin: VIEWER_LOGIN,
+      stateStore: store,
+      nowMs: FIXTURE_NOW_MS,
+    });
+
+    expect(pullRequests).toHaveLength(1);
+    const pr = pullRequests[0]!;
+    expect(pr.bucket).toBe('draft');
+    expect(pr.myAction).toBe('none');
+    expect(pr.merge.state).toBe('behind');
+    expect(pr.blockers).toContain('draft');
+    expect(pr.blockers).toContain('behind-base');
+    expect(pr.blockerSummary).toContain('Draft');
+    expect(pr.blockerSummary).toContain('behind base');
   });
 });

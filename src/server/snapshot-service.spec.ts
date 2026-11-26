@@ -9,8 +9,14 @@ import {
   fixtureAutoMerge,
   fixtureDirectReviewRequest,
   fixtureNoCiRollup,
+  makeBaseRawPr,
 } from '@/server/derive/__fixtures__/pull-requests';
-import { GitHubAuthError, GitHubRateLimitError, type GitHubClient } from '@/server/github-client';
+import {
+  GitHubAuthError,
+  GitHubRateLimitError,
+  createGitHubClient,
+  type GitHubClient,
+} from '@/server/github-client';
 import {
   RefreshCooldownError,
   createSnapshotService,
@@ -524,5 +530,204 @@ describe('snapshot-service & state machine', () => {
     const warmed = await service2.getSnapshot();
     expect(warmed.snapshot.pullRequests).toHaveLength(1);
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
+  });
+
+  it('compares uncached non-conflicting draft branches once per (baseRefOid, headRefOid) pair and reuses cache', async () => {
+    const stateStore = await makeStateStore();
+    let nowMs = FIXTURE_NOW_MS;
+    const baseShaV1 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const baseShaV2 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const headBehind = '1111111111111111111111111111111111111111';
+    const headUpToDate = '2222222222222222222222222222222222222222';
+    const headConflict = '3333333333333333333333333333333333333333';
+    const headAlreadyBehind = '4444444444444444444444444444444444444444';
+
+    let currentBaseSha = baseShaV1;
+    const makeDrafts = () => [
+      makeBaseRawPr({
+        id: 'PR_d1',
+        number: 701,
+        isDraft: true,
+        baseRefName: 'master',
+        baseRefOid: currentBaseSha,
+        headRefOid: headBehind,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'BLOCKED',
+      }),
+      makeBaseRawPr({
+        id: 'PR_d2',
+        number: 702,
+        isDraft: true,
+        baseRefName: 'master',
+        baseRefOid: currentBaseSha,
+        headRefOid: headUpToDate,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      makeBaseRawPr({
+        id: 'PR_d3',
+        number: 703,
+        isDraft: true,
+        baseRefName: 'master',
+        baseRefOid: currentBaseSha,
+        headRefOid: headConflict,
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+      }),
+      makeBaseRawPr({
+        id: 'PR_d4',
+        number: 704,
+        isDraft: true,
+        baseRefName: 'master',
+        baseRefOid: currentBaseSha,
+        headRefOid: headAlreadyBehind,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'BEHIND',
+      }),
+    ];
+
+    const compareDraftBranches = vi
+      .fn<NonNullable<GitHubClient['compareDraftBranches']>>()
+      .mockResolvedValueOnce({
+        behindByByKey: {
+          'acme/web-app#701': 12,
+          'acme/web-app#702': 0,
+        },
+        rateLimit: null,
+      })
+      .mockResolvedValueOnce({
+        behindByByKey: {
+          'acme/web-app#701': 15,
+          'acme/web-app#702': 3,
+        },
+        rateLimit: null,
+      });
+
+    const client: GitHubClient = {
+      fetchAuthoredPulls: vi
+        .fn<GitHubClient['fetchAuthoredPulls']>()
+        .mockImplementation(async () => ({
+          login: VIEWER_LOGIN,
+          pullRequests: makeDrafts(),
+          rateLimit: null,
+          warnings: [],
+          cost: 1,
+        })),
+      fetchReviewQueue: vi.fn<GitHubClient['fetchReviewQueue']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
+      compareDraftBranches,
+      fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
+      mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
+    };
+
+    const service = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => nowMs,
+    });
+
+    const first = await service.getSnapshot();
+    expect(compareDraftBranches).toHaveBeenCalledTimes(1);
+    expect(compareDraftBranches.mock.calls[0]![0].map((item) => item.key)).toEqual([
+      'acme/web-app#701',
+      'acme/web-app#702',
+    ]);
+    const byKey1 = new Map(first.snapshot.pullRequests.map((pr) => [pr.key, pr]));
+    expect(byKey1.get('acme/web-app#701')!.merge.state).toBe('behind');
+    expect(byKey1.get('acme/web-app#702')!.merge.state).toBe('draft');
+    expect(byKey1.get('acme/web-app#703')!.merge.state).toBe('draft');
+    expect(byKey1.get('acme/web-app#704')!.merge.state).toBe('behind');
+
+    // Second refresh with same baseRefOid + headRefOid reuses cache with 0 compare calls.
+    nowMs += 120_000;
+    const second = await service.getSnapshot();
+    expect(compareDraftBranches).toHaveBeenCalledTimes(1);
+    const byKey2 = new Map(second.snapshot.pullRequests.map((pr) => [pr.key, pr]));
+    expect(byKey2.get('acme/web-app#701')!.merge.state).toBe('behind');
+    expect(byKey2.get('acme/web-app#702')!.merge.state).toBe('draft');
+
+    // Base branch advances -> cache invalidates and #702 is now detected as behind.
+    currentBaseSha = baseShaV2;
+    nowMs += 120_000;
+    const third = await service.getSnapshot();
+    expect(compareDraftBranches).toHaveBeenCalledTimes(2);
+    const byKey3 = new Map(third.snapshot.pullRequests.map((pr) => [pr.key, pr]));
+    expect(byKey3.get('acme/web-app#702')!.merge.state).toBe('behind');
+  });
+
+  it('batches draft branch comparisons in createGitHubClient using parameterized GraphQL variables', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: {
+            rateLimit: { remaining: 4990, limit: 5000, resetAt: '2026-11-24T13:00:00Z' },
+            repository: {
+              ref: {
+                c0: { behindBy: 21 },
+                c1: { behindBy: 0 },
+              },
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const gh = createGitHubClient({
+      tokenStore: makeTokenStore(),
+      fetchFn: fetchMock,
+    });
+
+    const result = await gh.compareDraftBranches!([
+      {
+        key: 'acme/app#1',
+        owner: 'acme',
+        repo: 'app',
+        baseRefName: 'master',
+        baseRefOid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        headRefOid: '1111111111111111111111111111111111111111',
+      },
+      {
+        key: 'acme/app#2',
+        owner: 'acme',
+        repo: 'app',
+        baseRefName: 'master',
+        baseRefOid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        headRefOid: '2222222222222222222222222222222222222222',
+      },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)) as {
+      query: string;
+      variables: Record<string, string>;
+    };
+    expect(body.variables).toEqual({
+      owner: 'acme',
+      repo: 'app',
+      baseRef: 'refs/heads/master',
+      h0: '1111111111111111111111111111111111111111',
+      h1: '2222222222222222222222222222222222222222',
+    });
+    expect(result.behindByByKey).toEqual({
+      'acme/app#1': 21,
+      'acme/app#2': 0,
+    });
+    expect(result.rateLimit?.remaining).toBe(4990);
   });
 });

@@ -100,6 +100,15 @@ describe('derive/summary table', () => {
       expectedParts: ['Draft', 'CI passing ✓', 'no review requested'],
     },
     {
+      label: 'behind-base draft includes behind base in summary',
+      input: makeSummaryInput({
+        isDraft: true,
+        bucket: 'draft',
+        merge: { state: 'behind', source: 'fresh' },
+      }),
+      expectedParts: ['Draft', 'CI passing ✓', 'behind base', 'no review requested'],
+    },
+    {
       label: 'team review request',
       input: makeSummaryInput({
         sources: ['review-requested'],
