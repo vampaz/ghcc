@@ -1,9 +1,9 @@
 <template>
   <section class="rail-card" aria-labelledby="waiting-heading">
-    <header class="rail-head">
+    <div class="rail-head">
       <h2 id="waiting-heading" class="rail-title">Waiting on Others</h2>
       <span class="rail-count mono-num">{{ pullRequests.length }}</span>
-    </header>
+    </div>
 
     <p v-if="pullRequests.length === 0" class="rail-empty">
       No pull requests waiting on reviewers or CI.
@@ -200,6 +200,7 @@ function waitingReason(pr: PrView): string {
 
 <style scoped>
 .rail-card {
+  container-type: inline-size;
   padding: 0.875rem;
   border-radius: 0.5rem;
   border: 1px solid var(--border-subtle);
@@ -407,5 +408,19 @@ function waitingReason(pr: PrView): string {
   min-inline-size: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@container (max-width: 24rem) {
+  .waiting-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+    padding-inline-end: 0;
+  }
+
+  .waiting-actions {
+    padding: 0 0.5rem 0.45rem;
+    justify-content: flex-start;
+  }
 }
 </style>

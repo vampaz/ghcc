@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { nextTick } from 'vue';
 import RepoPicker from '@/components/RepoPicker.vue';
 import {
   ALL_REPOS_SELECTION,
@@ -220,5 +221,52 @@ describe('RepoPicker', () => {
     expect(emptyWrapper.find('#toggle-all-repos').exists()).toBe(false);
 
     emptyWrapper.unmount();
+  });
+
+  it('keeps the subset trigger label and active state when pullRequests is empty', () => {
+    const wrapper = mountWithDeps(RepoPicker, {
+      props: {
+        pullRequests: [],
+        repoSelection: { mode: 'subset', repos: ['acme/core-api'] },
+      },
+    });
+    const trigger = wrapper.find('.repo-picker-trigger');
+
+    expect(trigger.text()).toBe('core-api');
+    expect(trigger.classes()).toContain('active');
+
+    wrapper.unmount();
+  });
+
+  it('focuses the empty popover container and traps Escape without propagating', async () => {
+    const wrapper = mountWithDeps(RepoPicker, {
+      attachTo: document.body,
+      props: {
+        pullRequests: [],
+        repoSelection: ALL_REPOS_SELECTION,
+      },
+    });
+    const onWindowKeydown = vi.fn<(event: KeyboardEvent) => void>();
+    window.addEventListener('keydown', onWindowKeydown);
+
+    try {
+      const trigger = wrapper.find('.repo-picker-trigger');
+      const popover = wrapper.find('.repo-picker-popover');
+
+      await trigger.trigger('click');
+      await nextTick();
+
+      expect(trigger.attributes('aria-expanded')).toBe('true');
+      expect(document.activeElement).toBe(popover.element);
+
+      await popover.trigger('keydown', { key: 'Escape' });
+
+      expect(trigger.attributes('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(trigger.element);
+      expect(onWindowKeydown).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', onWindowKeydown);
+      wrapper.unmount();
+    }
   });
 });

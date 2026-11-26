@@ -7,7 +7,16 @@
   "rules": {
     "no-console": "off"
   },
-  "ignorePatterns": ["dist/**", ".astro/**", ".cache/**", "coverage/**", "PLAN.md"],
+  "ignorePatterns": [
+    "dist/**",
+    ".astro/**",
+    ".cache/**",
+    "coverage/**",
+    "test-results/**",
+    "playwright-report/**",
+    "blob-report/**",
+    "PLAN.md"
+  ],
   "env": {
     "builtin": true,
     "browser": true,

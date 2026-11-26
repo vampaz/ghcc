@@ -5,7 +5,7 @@ A local and self-hosted web dashboard for pull requests you authored, pull reque
 ## Features
 
 - **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); full-width **Action Queue** (including your authored waiting PRs) alongside a **Waiting on Others** quick-jump panel and `stale` badge after 3+ idle days.
-- **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, and blocker summary; multi-repository checkboxes with a tri-state toggle-all in **By Repository**; URL-synced filter state.
+- **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, and blocker summary; multi-repository checkboxes with a tri-state toggle-all in the top-bar **All repos** dropdown; URL-synced filter state.
 - **Non-modal PR inspector**: Slide-over right sidebar showing full CI checks, reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
 - **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), and `Sync` button to merge the base branch into behind-base PRs (GitHub `update-branch` REST API), all same-origin protected.
 - **Live polling & theme**: Configurable auto-refresh (`120s` default) plus manual refresh (`r`), GraphQL rate-limit indicator, and light/dark mode toggle.

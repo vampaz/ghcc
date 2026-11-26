@@ -1,6 +1,12 @@
-import type { PrView, SnapshotResponse } from '../../src/types/pr';
+import type {
+  PrDetailCheck,
+  PrDetailResponse,
+  PrReviewerDetail,
+  PrView,
+  SnapshotResponse,
+} from '../../src/types/pr';
 
-function makePrView(overrides: Partial<PrView> = {}): PrView {
+export function makePrView(overrides: Partial<PrView> = {}): PrView {
   return {
     key: 'acme/core-api#101',
     owner: 'acme',
@@ -51,12 +57,12 @@ function makePrView(overrides: Partial<PrView> = {}): PrView {
   };
 }
 
-export function makeSnapshot(): SnapshotResponse {
+export function makeSnapshot(overrides: Partial<SnapshotResponse> = {}): SnapshotResponse {
   return {
     fetchedAt: new Date().toISOString(),
     viewer: { login: 'vampaz' },
     state: 'ready',
-    counts: { needsMe: 1, ready: 1, waiting: 1, draft: 1 },
+    counts: { needsMe: 1, ready: 1, waiting: 2, draft: 1 },
     pullRequests: [
       makePrView(),
       makePrView({
@@ -88,6 +94,22 @@ export function makeSnapshot(): SnapshotResponse {
         blockerSummary: 'CI passing ✓ · waiting on @leo · 5d since update',
       }),
       makePrView({
+        key: 'acme/worker#304',
+        repo: 'worker',
+        repository: 'acme/worker',
+        number: 304,
+        title: 'feat: batch worker metrics',
+        url: 'https://github.com/acme/worker/pull/304',
+        author: 'ana',
+        sources: ['repo'],
+        bucket: 'waiting',
+        myAction: 'none',
+        blockers: ['review-required'],
+        ci: { state: 'passing', passing: 2, failing: [], pending: 0, hiddenCount: 0 },
+        idleDays: 1,
+        blockerSummary: 'CI passing ✓ · waiting on @leo',
+      }),
+      makePrView({
         key: 'acme/docs#404',
         repo: 'docs',
         repository: 'acme/docs',
@@ -107,5 +129,94 @@ export function makeSnapshot(): SnapshotResponse {
       core: null,
     },
     warnings: [],
+    ...overrides,
+  };
+}
+
+export function makePrDetail(pr: PrView = makePrView()): PrDetailResponse {
+  const checks: PrDetailCheck[] = [
+    ...pr.ci.failing.map((check) => ({
+      name: check.name,
+      kind: 'CheckRun' as const,
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      bucket: 'failing' as const,
+      url: check.url,
+      description: null,
+      startedAt: pr.updatedAt,
+      completedAt: pr.updatedAt,
+    })),
+    ...Array.from({ length: pr.ci.passing }, (_, index) => ({
+      name: `check-${index + 1}`,
+      kind: 'CheckRun' as const,
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      bucket: 'passing' as const,
+      url: `${pr.url}/checks`,
+      description: null,
+      startedAt: pr.updatedAt,
+      completedAt: pr.updatedAt,
+    })),
+    ...Array.from({ length: pr.ci.pending }, (_, index) => ({
+      name: `pending-${index + 1}`,
+      kind: 'CheckRun' as const,
+      status: 'IN_PROGRESS',
+      conclusion: null,
+      bucket: 'pending' as const,
+      url: `${pr.url}/checks`,
+      description: null,
+      startedAt: pr.updatedAt,
+      completedAt: null,
+    })),
+  ];
+
+  const reviewers: PrReviewerDetail[] = [
+    ...pr.review.approvals.map((login) => ({
+      login,
+      kind: 'user' as const,
+      state: 'APPROVED' as const,
+      submittedAt: pr.updatedAt,
+      asCodeOwner: false,
+    })),
+    ...pr.review.changesRequested.map((login) => ({
+      login,
+      kind: 'user' as const,
+      state: 'CHANGES_REQUESTED' as const,
+      submittedAt: pr.updatedAt,
+      asCodeOwner: false,
+    })),
+    ...pr.review.pending.map((login) => ({
+      login,
+      kind: 'user' as const,
+      state: 'PENDING' as const,
+      submittedAt: null,
+      asCodeOwner: false,
+    })),
+  ];
+
+  return {
+    key: pr.key,
+    owner: pr.owner,
+    repo: pr.repo,
+    number: pr.number,
+    title: pr.title,
+    url: pr.url,
+    baseRefName: pr.baseRefName,
+    headRefName: pr.headRefName,
+    isDraft: pr.isDraft,
+    bodyExcerpt: 'Summary of changes for this pull request.',
+    checksTotalCount: checks.length + pr.ci.hiddenCount,
+    checks,
+    reviewers,
+    timeline: [
+      {
+        id: `${pr.key}-commit-1`,
+        kind: 'commit',
+        actor: pr.author,
+        createdAt: pr.lastCommittedAt,
+        summary: pr.title,
+      },
+    ],
+    fetchedAt: new Date().toISOString(),
   };
 }

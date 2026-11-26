@@ -15,9 +15,14 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: `GHCC_SKIP_BOOT_CHECK=1 PORT=${PORT} npm run build && GHCC_SKIP_BOOT_CHECK=1 PORT=${PORT} node scripts/start.mjs`,
+    command: 'npm run build && node scripts/start.mjs',
+    env: {
+      HOST: '127.0.0.1',
+      PORT: String(PORT),
+      GHCC_SKIP_BOOT_CHECK: '1',
+    },
     url: BASE_URL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 240_000,
   },
 });

@@ -209,7 +209,7 @@ const triggerLabel = computed<string>(() => {
   if (props.repoSelection.mode === 'none') {
     return 'No repos';
   }
-  if (props.repoSelection.mode === 'all' || entries.value.length === 0) {
+  if (props.repoSelection.mode === 'all' || props.repoSelection.repos.length === 0) {
     return 'All repos';
   }
   if (props.repoSelection.repos.length === 1) {
@@ -385,7 +385,7 @@ function openMenu(): void {
     void nextTick(positionPopover);
   }
   void nextTick(() => {
-    allInputRef.value?.focus();
+    (allInputRef.value ?? popoverRef.value)?.focus();
   });
 }
 
@@ -425,7 +425,7 @@ function onPopoverToggle(event: Event): void {
     positionPopover();
     attachResizeListener();
     void nextTick(() => {
-      allInputRef.value?.focus();
+      (allInputRef.value ?? popoverRef.value)?.focus();
     });
   } else {
     detachResizeListener();

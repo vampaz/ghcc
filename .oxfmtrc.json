@@ -5,5 +5,14 @@
   "trailingComma": "all",
   "printWidth": 100,
   "astro": true,
-  "ignorePatterns": ["PLAN.md", "dist/**", ".astro/**", ".cache/**", "coverage/**"]
+  "ignorePatterns": [
+    "PLAN.md",
+    "dist/**",
+    ".astro/**",
+    ".cache/**",
+    "coverage/**",
+    "test-results/**",
+    "playwright-report/**",
+    "blob-report/**"
+  ]
 }

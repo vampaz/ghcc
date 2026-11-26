@@ -55,11 +55,14 @@
 
   <section
     v-else-if="inspector.status !== 'closed' && pr"
+    ref="inlineRef"
     class="inspector-inline"
     aria-labelledby="inspector-inline-title"
   >
     <div class="inline-header">
-      <h2 id="inspector-inline-title" class="inline-title">Pull Request Details</h2>
+      <h2 id="inspector-inline-title" ref="inlineTitleRef" class="inline-title" tabindex="-1">
+        Pull Request Details
+      </h2>
       <button type="button" class="drawer-btn" @click="$emit('close')">
         <CarbonIcon name="close" :size="14" />
         <span>Close</span>
@@ -86,7 +89,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
 import PrInspectorBody from '@/components/PrInspectorBody.vue';
 import {
@@ -137,6 +140,8 @@ defineEmits<{
 
 const lastOpenPr = ref<PrView | null>(props.pr);
 const lastOpenInspector = ref<InspectorState>(props.inspector);
+const inlineRef = ref<HTMLElement | null>(null);
+const inlineTitleRef = ref<HTMLHeadingElement | null>(null);
 
 watch(
   () => [props.pr, props.inspector] as const,
@@ -149,6 +154,43 @@ watch(
     }
   },
   { immediate: true },
+);
+
+const inlineFocusKey = computed<string | null>(() => {
+  if (props.mode !== 'inline' || props.inspector.status === 'closed' || !props.pr) {
+    return null;
+  }
+  return props.inspector.key;
+});
+
+function focusAndScrollInline(): void {
+  if (!inlineFocusKey.value || typeof window === 'undefined') {
+    return;
+  }
+  const prefersReducedMotion =
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  inlineTitleRef.value?.focus({ preventScroll: true });
+  if (typeof inlineRef.value?.scrollIntoView === 'function') {
+    inlineRef.value.scrollIntoView({
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      block: 'nearest',
+    });
+  }
+}
+
+onMounted(() => {
+  focusAndScrollInline();
+});
+
+watch(
+  inlineFocusKey,
+  (nextKey) => {
+    if (nextKey) {
+      focusAndScrollInline();
+    }
+  },
+  { flush: 'post' },
 );
 
 const isOpen = computed<boolean>(() => props.inspector.status !== 'closed');
