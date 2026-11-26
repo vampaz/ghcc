@@ -56,24 +56,84 @@ describe('derive/mergeability', () => {
     expect(cached?.mergeable).toBe('MERGEABLE');
   });
 
-  it('uses fresh cached mergeable value for matching headRefOid (<=15m) without probing', async () => {
+  it('uses fresh cached mergeable value for matching (headRefOid, baseRefOid) (<=3m) without probing', async () => {
     const store = await makeStore();
     await store.setMergeability('acme/core-api#201', {
       headRefOid: fixtureUnknownMergeable.headRefOid,
+      baseRefOid: 'base-sha-v1',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      checkedAt: new Date(FIXTURE_NOW_MS - 5 * 60_000).toISOString(),
+      checkedAt: new Date(FIXTURE_NOW_MS - 2 * 60_000).toISOString(),
     });
     const probeFn = vi.fn<ProbeFn>();
 
-    const res = await resolveMergeability(fixtureUnknownMergeable, {
-      stateStore: store,
-      probeFn,
-      nowMs: FIXTURE_NOW_MS,
-    });
+    const res = await resolveMergeability(
+      { ...fixtureUnknownMergeable, baseRefOid: 'base-sha-v1' },
+      {
+        stateStore: store,
+        probeFn,
+        nowMs: FIXTURE_NOW_MS,
+      },
+    );
     expect(res.merge.state).toBe('clean');
     expect(res.merge.source).toBe('cached');
     expect(probeFn).not.toHaveBeenCalled();
+  });
+
+  it('invalidates cached mergeability and ETag when baseRefOid advances or bypassCache is true', async () => {
+    const store = await makeStore();
+    await store.setMergeability('acme/core-api#201', {
+      headRefOid: fixtureUnknownMergeable.headRefOid,
+      baseRefOid: 'base-sha-v1',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      checkedAt: new Date(FIXTURE_NOW_MS - 30_000).toISOString(),
+      etag: '"etag-old-base"',
+    });
+
+    const probeFn = vi
+      .fn<ProbeFn>()
+      .mockResolvedValueOnce({
+        status: 'ok',
+        mergeable: false,
+        mergeableState: 'dirty',
+        etag: '"etag-new-base"',
+        coreRateLimit: null,
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        mergeable: true,
+        mergeableState: 'behind',
+        etag: '"etag-manual"',
+        coreRateLimit: null,
+      });
+
+    // Base branch moved -> must not reuse old CLEAN cache or stale ETag
+    const afterBaseMove = await resolveMergeability(
+      { ...fixtureUnknownMergeable, baseRefOid: 'base-sha-v2' },
+      {
+        stateStore: store,
+        probeFn,
+        nowMs: FIXTURE_NOW_MS,
+      },
+    );
+    expect(probeFn).toHaveBeenNthCalledWith(1, 'acme', 'core-api', 201, undefined);
+    expect(afterBaseMove.merge.state).toBe('conflicting');
+    expect(afterBaseMove.merge.source).toBe('probe');
+
+    // bypassCache: true forces a REST probe even within 3m TTL using current ETag
+    const afterBypass = await resolveMergeability(
+      { ...fixtureUnknownMergeable, baseRefOid: 'base-sha-v2' },
+      {
+        stateStore: store,
+        probeFn,
+        nowMs: FIXTURE_NOW_MS + 15_000,
+        bypassCache: true,
+      },
+    );
+    expect(probeFn).toHaveBeenNthCalledWith(2, 'acme', 'core-api', 201, '"etag-new-base"');
+    expect(afterBypass.merge.state).toBe('behind');
+    expect(afterBypass.merge.source).toBe('probe');
   });
 
   it('probes REST when headRefOid changes or cache expires, and handles null benignly', async () => {
@@ -122,7 +182,7 @@ describe('derive/mergeability', () => {
     expect(second.merge.source).toBe('probe');
   });
 
-  it('enforces the max 2 probes per hour per headRefOid and max 5 probes per refresh', async () => {
+  it('enforces the max 6 probes per hour per headRefOid and max 5 probes per refresh', async () => {
     const store = await makeStore();
     const probeFn = vi.fn<ProbeFn>().mockResolvedValue({
       status: 'ok',
@@ -131,23 +191,15 @@ describe('derive/mergeability', () => {
       coreRateLimit: null,
     });
 
-    await resolveMergeability(fixtureUnknownMergeable, {
-      stateStore: store,
-      probeFn,
-      nowMs: FIXTURE_NOW_MS,
-    });
-    await resolveMergeability(fixtureUnknownMergeable, {
-      stateStore: store,
-      probeFn,
-      nowMs: FIXTURE_NOW_MS + 1000,
-    });
-    await resolveMergeability(fixtureUnknownMergeable, {
-      stateStore: store,
-      probeFn,
-      nowMs: FIXTURE_NOW_MS + 2000,
-    });
+    for (let i = 0; i < 7; i++) {
+      await resolveMergeability(fixtureUnknownMergeable, {
+        stateStore: store,
+        probeFn,
+        nowMs: FIXTURE_NOW_MS + i * 1000,
+      });
+    }
 
-    expect(probeFn).toHaveBeenCalledTimes(2);
+    expect(probeFn).toHaveBeenCalledTimes(6);
 
     // Refresh-level budget of 5 shared across PRs:
     const budget = { remaining: 5 };
@@ -166,7 +218,7 @@ describe('derive/mergeability', () => {
         probeBudget: budget,
       });
     }
-    expect(probeFn).toHaveBeenCalledTimes(7); // 2 + 5
+    expect(probeFn).toHaveBeenCalledTimes(11); // 6 + 5
   });
 
   it('refreshes checkedAt on 304 Not Modified when cached value exists for same headRefOid', async () => {

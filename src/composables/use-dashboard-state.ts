@@ -184,9 +184,34 @@ export function transitionPrSyncState(current: PrSyncState, event: PrSyncEvent):
   }
 }
 
-export const DEFAULT_POLL_INTERVAL_MS = 120_000;
+export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 export const MIN_POLL_INTERVAL_MS = 60_000;
+export const DETAIL_CACHE_TTL_MS = 30_000;
+export const TAB_FOCUS_REFRESH_MIN_AGE_MS = 60_000;
+export const RECENTLY_UPDATED_DURATION_MS = 2_000;
 export const DEFAULT_SYNC_REFRESH_DELAY_MS = 2_000;
+
+interface CachedPrDetail {
+  fetchedAtMs: number;
+  fingerprint: string;
+  detail: PrDetailResponse;
+}
+
+function getPrDetailFingerprint(pr: PrView): string {
+  return [
+    pr.headRefOid,
+    pr.updatedAt,
+    pr.isDraft ? '1' : '0',
+    pr.ci.state,
+    pr.ci.passing,
+    pr.ci.failing.length,
+    pr.ci.pending,
+    pr.review.decision,
+    pr.review.approvals.length,
+    pr.review.changesRequested.length,
+    pr.review.pending.length,
+  ].join('|');
+}
 
 export function useDashboardState(
   options: {
@@ -205,6 +230,8 @@ export function useDashboardState(
   const snapshot = ref<SnapshotResponse | null>(null);
   const etag = ref<string | null>(null);
   const nowMs = ref<number>(Date.now());
+  const nextRefreshAtMs = ref<number | null>(null);
+  const recentlyUpdated = ref<boolean>(false);
   const offlineMessage = ref<string | null>(null);
   const refreshCooldownNotice = ref<string | null>(null);
   const announcement = ref<string>('');
@@ -220,7 +247,8 @@ export function useDashboardState(
     detail: null,
     error: null,
   });
-  const detailCache = new Map<string, PrDetailResponse>();
+  const detailCache = new Map<string, CachedPrDetail>();
+  let inspectorRequestId = 0;
 
   const isStale = computed<boolean>(() => {
     if (!snapshot.value?.fetchedAt) {
@@ -435,6 +463,7 @@ export function useDashboardState(
       }
 
       const data = (await response.json()) as UpdateLabelsResponse;
+      detailCache.delete(pr.key);
       setLabelState(
         pr.key,
         transitionPrLabelsState(getLabelState(pr.key), { type: 'SAVE_SUCCEEDED' }),
@@ -491,19 +520,31 @@ export function useDashboardState(
       if (shouldReset) {
         delete nextMap[key];
         changed = true;
-        if (
-          updated &&
-          inspector.value.status === 'open' &&
-          inspector.value.key === key &&
-          updated.headRefOid !== state.headRefOid
-        ) {
-          void openInspector(updated);
-        }
       }
     }
 
     if (changed) {
       syncStates.value = nextMap;
+    }
+  }
+
+  function reconcileOpenInspector(data: SnapshotResponse, force: boolean): void {
+    if (inspector.value.status === 'closed' || !inspector.value.key) {
+      return;
+    }
+    const updated = data.pullRequests.find((pr) => pr.key === inspector.value.key);
+    if (!updated) {
+      return;
+    }
+    const cached = detailCache.get(updated.key);
+    const fingerprint = getPrDetailFingerprint(updated);
+    const isStale =
+      force ||
+      !cached ||
+      cached.fingerprint !== fingerprint ||
+      Date.now() - cached.fetchedAtMs >= DETAIL_CACHE_TTL_MS;
+    if (isStale) {
+      void openInspector(updated, { force: true, preserveExisting: true });
     }
   }
 
@@ -513,16 +554,39 @@ export function useDashboardState(
 
   let fetchInFlight = false;
   let pendingRefreshAfterSync = false;
+  let pendingWaitForServerRefresh = false;
+  let recentlyUpdatedTimer: number | null = null;
 
-  async function fetchSnapshot(force = false): Promise<void> {
+  function markRecentlyUpdated(): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    recentlyUpdated.value = true;
+    if (recentlyUpdatedTimer !== null) {
+      window.clearTimeout(recentlyUpdatedTimer);
+    }
+    recentlyUpdatedTimer = window.setTimeout(() => {
+      recentlyUpdatedTimer = null;
+      recentlyUpdated.value = false;
+    }, RECENTLY_UPDATED_DURATION_MS);
+  }
+
+  async function fetchSnapshot(
+    force = false,
+    options: { waitForServer?: boolean } = {},
+  ): Promise<void> {
     if (fetchInFlight) {
       return;
     }
     fetchInFlight = true;
+    clearPollTimer();
+    nextRefreshAtMs.value = null;
     if (snapshot.value !== null) {
       clientState.value = 'refreshing';
     }
     refreshCooldownNotice.value = null;
+
+    let serverStillRefreshing = false;
 
     try {
       let response: Response;
@@ -551,7 +615,8 @@ export function useDashboardState(
         if (etag.value) {
           headers['If-None-Match'] = etag.value;
         }
-        response = await fetchFn('/api/snapshot', { method: 'GET', headers });
+        const endpoint = options.waitForServer ? '/api/snapshot?wait=1' : '/api/snapshot';
+        response = await fetchFn(endpoint, { method: 'GET', headers });
       }
 
       if (response.status === 304) {
@@ -565,19 +630,38 @@ export function useDashboardState(
         throw new Error(`Dashboard server returned HTTP ${response.status}`);
       }
 
+      const previousFetchedAt = snapshot.value?.fetchedAt ?? null;
       const data = (await response.json()) as SnapshotResponse;
       const nextEtag = response.headers.get('etag');
       if (nextEtag) {
         etag.value = nextEtag;
       }
+      if (force) {
+        detailCache.clear();
+      }
+      serverStillRefreshing =
+        !force && !options.waitForServer && response.headers.get('x-ghcc-refreshing') === '1';
+
       snapshot.value = data;
       offlineMessage.value = null;
-      clientState.value = 'live';
+      clientState.value = serverStillRefreshing ? 'refreshing' : 'live';
       nowMs.value = Date.now();
+      if (
+        !serverStillRefreshing &&
+        previousFetchedAt !== null &&
+        data.fetchedAt !== previousFetchedAt
+      ) {
+        markRecentlyUpdated();
+      }
       reconcileSyncStates(data);
       reconcileDraftStates(data);
       reconcileMergeStates(data);
+      reconcileOpenInspector(data, force);
       announceSnapshot(data);
+
+      if (serverStillRefreshing) {
+        pendingWaitForServerRefresh = true;
+      }
     } catch (error) {
       offlineMessage.value =
         error instanceof Error ? error.message : 'Local ghcc server is unreachable';
@@ -586,7 +670,13 @@ export function useDashboardState(
       fetchInFlight = false;
       if (pendingRefreshAfterSync) {
         pendingRefreshAfterSync = false;
+        pendingWaitForServerRefresh = false;
         void fetchSnapshot(false);
+      } else if (pendingWaitForServerRefresh) {
+        pendingWaitForServerRefresh = false;
+        void fetchSnapshot(false, { waitForServer: true });
+      } else {
+        scheduleNextPoll();
       }
     }
   }
@@ -640,7 +730,7 @@ export function useDashboardState(
       }
 
       const data = (await response.json()) as UpdateBranchResponse;
-      detailCache.delete(`${pr.key}@${pr.headRefOid}`);
+      detailCache.delete(pr.key);
       setSyncState(
         pr.key,
         transitionPrSyncState(getSyncState(pr.key), {
@@ -693,7 +783,7 @@ export function useDashboardState(
       }
 
       const data = (await response.json()) as ToggleDraftResponse;
-      detailCache.delete(`${pr.key}@${pr.headRefOid}`);
+      detailCache.delete(pr.key);
       setDraftState(
         pr.key,
         transitionPrDraftState(getDraftState(pr.key), { type: 'TOGGLE_SUCCEEDED' }),
@@ -713,7 +803,10 @@ export function useDashboardState(
         : `Marked ${pr.key} ready for review.`;
 
       if (inspector.value.status !== 'closed' && inspector.value.key === pr.key) {
-        void openInspector({ ...pr, isDraft: data.isDraft });
+        void openInspector(
+          { ...pr, isDraft: data.isDraft },
+          { force: true, preserveExisting: true },
+        );
       }
 
       if (fetchInFlight) {
@@ -768,7 +861,7 @@ export function useDashboardState(
       }
 
       const data = (await response.json()) as MergePullResponse;
-      detailCache.delete(`${pr.key}@${pr.headRefOid}`);
+      detailCache.delete(pr.key);
       setMergeState(
         pr.key,
         transitionPrMergeState(getMergeState(pr.key), {
@@ -823,15 +916,34 @@ export function useDashboardState(
     }
   }
 
-  async function openInspector(pr: PrView): Promise<void> {
-    const cacheKey = `${pr.key}@${pr.headRefOid}`;
-    const cached = detailCache.get(cacheKey);
-    if (cached) {
-      inspector.value = { status: 'open', key: pr.key, detail: cached, error: null };
+  async function openInspector(
+    pr: PrView,
+    options: { force?: boolean; preserveExisting?: boolean } = {},
+  ): Promise<void> {
+    const fingerprint = getPrDetailFingerprint(pr);
+    const cached = detailCache.get(pr.key);
+    const isCacheFresh =
+      !options.force &&
+      cached !== undefined &&
+      cached.fingerprint === fingerprint &&
+      Date.now() - cached.fetchedAtMs < DETAIL_CACHE_TTL_MS;
+
+    if (isCacheFresh) {
+      inspectorRequestId++;
+      inspector.value = { status: 'open', key: pr.key, detail: cached.detail, error: null };
       return;
     }
 
-    inspector.value = { status: 'loading', key: pr.key, detail: null, error: null };
+    const requestId = ++inspectorRequestId;
+    const keepExistingDetail =
+      Boolean(options.preserveExisting) &&
+      inspector.value.status === 'open' &&
+      inspector.value.key === pr.key;
+
+    if (!keepExistingDetail) {
+      inspector.value = { status: 'loading', key: pr.key, detail: null, error: null };
+    }
+
     try {
       const response = await fetchFn(
         `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}`,
@@ -844,13 +956,22 @@ export function useDashboardState(
         );
       }
       const detail = (await response.json()) as PrDetailResponse;
-      detailCache.set(cacheKey, detail);
+      detailCache.set(pr.key, { fetchedAtMs: Date.now(), fingerprint, detail });
       // Guard against stale async completion if user switched PR or closed inspector.
-      if (inspector.value.status === 'loading' && inspector.value.key === pr.key) {
+      if (
+        inspectorRequestId === requestId &&
+        inspector.value.status !== 'closed' &&
+        inspector.value.key === pr.key
+      ) {
         inspector.value = { status: 'open', key: pr.key, detail, error: null };
       }
     } catch (error) {
-      if (inspector.value.status === 'loading' && inspector.value.key === pr.key) {
+      if (
+        inspectorRequestId === requestId &&
+        !keepExistingDetail &&
+        inspector.value.status === 'loading' &&
+        inspector.value.key === pr.key
+      ) {
         inspector.value = {
           status: 'error',
           key: pr.key,
@@ -862,47 +983,109 @@ export function useDashboardState(
   }
 
   function closeInspector(): void {
+    inspectorRequestId++;
     inspector.value = { status: 'closed', key: null, detail: null, error: null };
   }
 
   function setPollIntervalMs(ms: number): void {
     pollIntervalMs.value = Math.max(MIN_POLL_INTERVAL_MS, ms);
-    restartPolling();
+    if (fetchInFlight || isDocumentHidden()) {
+      return;
+    }
+    const fetchedMs = snapshot.value?.fetchedAt ? Date.parse(snapshot.value.fetchedAt) : NaN;
+    if (Number.isFinite(fetchedMs) && Date.now() - fetchedMs >= pollIntervalMs.value) {
+      void fetchSnapshot(false);
+      return;
+    }
+    scheduleNextPoll();
   }
 
   let pollTimer: number | null = null;
   let clockTimer: number | null = null;
 
-  function restartPolling(): void {
-    if (typeof window === 'undefined') {
+  function isDocumentHidden(): boolean {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  }
+
+  function clearPollTimer(): void {
+    if (typeof window !== 'undefined' && pollTimer !== null) {
+      window.clearTimeout(pollTimer);
+    }
+    pollTimer = null;
+  }
+
+  function scheduleNextPoll(): void {
+    clearPollTimer();
+    if (typeof window === 'undefined' || isDocumentHidden() || fetchInFlight) {
+      nextRefreshAtMs.value = null;
       return;
     }
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
+    const currentMs = Date.now();
+    const fetchedMs = snapshot.value?.fetchedAt ? Date.parse(snapshot.value.fetchedAt) : NaN;
+    const serverState = snapshot.value?.state;
+    const canAlignToFetchedAt =
+      Number.isFinite(fetchedMs) &&
+      serverState !== 'rate-limited' &&
+      serverState !== 'auth-error' &&
+      serverState !== 'fatal' &&
+      fetchedMs + pollIntervalMs.value > currentMs;
+
+    const targetMs = canAlignToFetchedAt
+      ? fetchedMs + pollIntervalMs.value
+      : currentMs + pollIntervalMs.value;
+    const delayMs = Math.max(1_000, targetMs - currentMs);
+    nextRefreshAtMs.value = currentMs + delayMs;
+    pollTimer = window.setTimeout(() => {
+      pollTimer = null;
+      if (!isDocumentHidden()) {
+        void fetchSnapshot(false);
+      }
+    }, delayMs);
+  }
+
+  function onVisibilityChange(): void {
+    if (isDocumentHidden()) {
+      clearPollTimer();
+      nextRefreshAtMs.value = null;
+      return;
     }
-    pollTimer = window.setInterval(() => {
+    const currentMs = Date.now();
+    nowMs.value = currentMs;
+    const fetchedMs = snapshot.value?.fetchedAt ? Date.parse(snapshot.value.fetchedAt) : NaN;
+    const minAgeMs = Math.min(pollIntervalMs.value, TAB_FOCUS_REFRESH_MIN_AGE_MS);
+    if (!Number.isFinite(fetchedMs) || currentMs - fetchedMs >= minAgeMs) {
       void fetchSnapshot(false);
-    }, pollIntervalMs.value);
+    } else {
+      scheduleNextPoll();
+    }
   }
 
   onMounted(() => {
     void fetchSnapshot(false);
-    restartPolling();
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    }
     clockTimer = window.setInterval(() => {
-      nowMs.value = Date.now();
-    }, 10_000);
+      if (!isDocumentHidden()) {
+        nowMs.value = Date.now();
+      }
+    }, 1_000);
   });
 
   onUnmounted(() => {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    }
+    clearPollTimer();
     if (typeof window !== 'undefined') {
-      if (pollTimer !== null) {
-        window.clearInterval(pollTimer);
-      }
       if (clockTimer !== null) {
         window.clearInterval(clockTimer);
       }
       if (syncRefreshTimer !== null) {
         window.clearTimeout(syncRefreshTimer);
+      }
+      if (recentlyUpdatedTimer !== null) {
+        window.clearTimeout(recentlyUpdatedTimer);
       }
     }
   });
@@ -911,6 +1094,8 @@ export function useDashboardState(
     clientState,
     snapshot,
     nowMs,
+    nextRefreshAtMs,
+    recentlyUpdated,
     pollIntervalMs,
     isStale,
     offlineMessage,

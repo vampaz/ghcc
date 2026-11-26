@@ -1469,4 +1469,199 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('expires inspector detail cache after 30s and refreshes open inspector on manual refresh', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-24T12:00:00.000Z'));
+      let detailFetchCount = 0;
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/pull/acme/core-api/101') {
+          detailFetchCount++;
+          const detail = makeDetail();
+          return new Response(
+            JSON.stringify({
+              ...detail,
+              bodyExcerpt: `Detail revision ${detailFetchCount}`,
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(JSON.stringify(makeSnapshot()), {
+          status: 200,
+          headers: { 'content-type': 'application/json', etag: `"snap-${detailFetchCount}"` },
+        });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+      await flushPromises();
+
+      // Open inspector -> fetches detail #1
+      await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+      await flushPromises();
+      expect(detailFetchCount).toBe(1);
+      expect(wrapper.find('.inspector-dialog').text()).toContain('Detail revision 1');
+
+      // Close and reopen within 30s -> uses fresh client cache (still 1 fetch)
+      await wrapper.find('.inspector-dialog button.drawer-btn').trigger('click');
+      await vi.advanceTimersByTimeAsync(10_000);
+      await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+      await flushPromises();
+      expect(detailFetchCount).toBe(1);
+
+      // Manual refresh while inspector is open -> clears cache and reloads open inspector in place
+      await wrapper.find('.refresh-btn').trigger('click');
+      await flushPromises();
+      expect(detailFetchCount).toBe(2);
+      expect(wrapper.find('.inspector-dialog').text()).toContain('Detail revision 2');
+
+      // Close, wait past 30s detail TTL, and reopen -> fetches detail #3 even on same headRefOid
+      await wrapper.find('.inspector-dialog button.drawer-btn').trigger('click');
+      await vi.advanceTimersByTimeAsync(31_000);
+      await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+      await flushPromises();
+      expect(detailFetchCount).toBe(3);
+      expect(wrapper.find('.inspector-dialog').text()).toContain('Detail revision 3');
+
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pauses interval polling while tab is hidden and catches up on visibilitychange', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-24T12:00:00.000Z'));
+      let visibilityState: DocumentVisibilityState = 'visible';
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => visibilityState,
+      });
+
+      let snapshotCalls = 0;
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+        snapshotCalls++;
+        return new Response(
+          JSON.stringify(makeSnapshot({ fetchedAt: new Date(Date.now()).toISOString() })),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json', etag: `"vis-${snapshotCalls}"` },
+          },
+        );
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const wrapper = mountWithDeps(DashboardApp);
+      await flushPromises();
+      expect(snapshotCalls).toBe(1);
+
+      // Hide tab and advance 2 minutes -> background interval ticks are skipped
+      visibilityState = 'hidden';
+      await vi.advanceTimersByTimeAsync(120_000);
+      await flushPromises();
+      expect(snapshotCalls).toBe(1);
+
+      // Return to tab -> immediately triggers catch-up snapshot fetch
+      visibilityState = 'visible';
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flushPromises();
+      expect(snapshotCalls).toBe(2);
+
+      // Quick tab switch (< 60s) -> does not spam snapshot fetches
+      visibilityState = 'hidden';
+      await vi.advanceTimersByTimeAsync(10_000);
+      visibilityState = 'visible';
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flushPromises();
+      expect(snapshotCalls).toBe(2);
+
+      wrapper.unmount();
+    } finally {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'visible',
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows refreshing state and immediately follows x-ghcc-refreshing with ?wait=1, and aligns next poll to fetchedAt', async () => {
+    vi.useFakeTimers();
+    try {
+      const baseNow = Date.parse('2026-11-24T12:00:45.000Z');
+      vi.setSystemTime(baseNow);
+
+      const requestedUrls: string[] = [];
+      let resolveWait!: (res: Response) => void;
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        requestedUrls.push(url);
+        if (requestedUrls.length === 1) {
+          // Warm-start cached response from 5m ago while server refreshes in background
+          return new Response(
+            JSON.stringify(makeSnapshot({ fetchedAt: '2026-11-24T11:55:45.000Z' })),
+            {
+              status: 200,
+              headers: {
+                'content-type': 'application/json',
+                etag: '"warm-1"',
+                'x-ghcc-refreshing': '1',
+              },
+            },
+          );
+        }
+        if (url === '/api/snapshot?wait=1') {
+          return await new Promise<Response>((resolve) => {
+            resolveWait = resolve;
+          });
+        }
+        return new Response(
+          JSON.stringify(makeSnapshot({ fetchedAt: new Date(Date.now()).toISOString() })),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json', etag: `"poll-${requestedUrls.length}"` },
+          },
+        );
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const wrapper = mountWithDeps(DashboardApp);
+      await flushPromises();
+
+      // Cached PRs rendered immediately while header visibly indicates server refresh in progress
+      expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(3);
+      expect(wrapper.find('.freshness-pill').attributes('data-state')).toBe('refreshing');
+      expect(wrapper.find('.freshness-pill progress.loading-spinner').exists()).toBe(true);
+      expect(wrapper.find('.freshness-pill').text()).toContain('Refreshing…');
+      expect(requestedUrls).toEqual(['/api/snapshot', '/api/snapshot?wait=1']);
+
+      // Server finishes background refresh -> returns a snapshot fetched 45s ago (aligning next poll to 15s)
+      resolveWait(
+        new Response(JSON.stringify(makeSnapshot({ fetchedAt: '2026-11-24T12:00:00.000Z' })), {
+          status: 200,
+          headers: { 'content-type': 'application/json', etag: '"fresh-2"' },
+        }),
+      );
+      await flushPromises();
+
+      expect(wrapper.find('.freshness-pill').attributes('data-state')).toBe('just-updated');
+      expect(wrapper.find('.freshness-pill').text()).toContain('Updated 45s ago');
+      expect(wrapper.find('.freshness-pill').text()).toContain('next in 15s');
+
+      // Advancing 15s triggers the aligned poll (instead of waiting a blind 60s)
+      await vi.advanceTimersByTimeAsync(15_000);
+      await flushPromises();
+      expect(requestedUrls).toEqual(['/api/snapshot', '/api/snapshot?wait=1', '/api/snapshot']);
+      expect(wrapper.find('.freshness-pill').text()).toContain('Updated just now');
+
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

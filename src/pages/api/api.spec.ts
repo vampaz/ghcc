@@ -141,6 +141,90 @@ describe('API routes (mocked fetch)', () => {
     );
     expect(second.status).toBe(304);
     expect(await second.text()).toBe('');
+    expect(first.headers.get('x-ghcc-refreshing')).toBeNull();
+  });
+
+  it('signals x-ghcc-refreshing on stale warm-start and awaits fresh snapshot on ?wait=1', async () => {
+    let nowMs = FIXTURE_NOW_MS;
+    const dir = await mkdtemp(join(tmpdir(), 'ghcc-api-swr-'));
+    dirs.push(dir);
+    const stateStore = new StateStore(join(dir, 'state.json'));
+    const tokenStore: TokenStore = {
+      getToken: vi.fn<TokenStore['getToken']>().mockResolvedValue(TEST_SECRET),
+      reloadToken: vi.fn<TokenStore['reloadToken']>().mockResolvedValue(TEST_SECRET),
+      getLogin: vi.fn<TokenStore['getLogin']>().mockResolvedValue(VIEWER_LOGIN),
+      getTokenSource: vi.fn<TokenStore['getTokenSource']>().mockReturnValue('gh-cli'),
+      peekToken: vi.fn<TokenStore['peekToken']>().mockReturnValue(TEST_SECRET),
+    };
+
+    let releaseSecondSnapshot = (): void => {};
+    let snapshotCalls = 0;
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        snapshotCalls++;
+        if (snapshotCalls === 2) {
+          await new Promise<void>((resolve) => {
+            releaseSecondSnapshot = resolve;
+          });
+        }
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    const gh1 = createGitHubClient({ tokenStore, fetchFn, now: () => nowMs });
+    const svc1 = createSnapshotService({
+      tokenStore,
+      githubClient: gh1,
+      stateStore,
+      now: () => nowMs,
+    });
+    setRuntimeForTesting({ tokenStore, githubClient: gh1, stateStore, snapshotService: svc1 });
+
+    // Populate persisted snapshot on disk
+    const initial = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(initial.status).toBe(200);
+    await stateStore.getLastSnapshot();
+
+    // Simulate restart 2 minutes later (stale disk snapshot)
+    nowMs += 120_000;
+    const gh2 = createGitHubClient({ tokenStore, fetchFn, now: () => nowMs });
+    const svc2 = createSnapshotService({
+      tokenStore,
+      githubClient: gh2,
+      stateStore,
+      now: () => nowMs,
+    });
+    setRuntimeForTesting({ tokenStore, githubClient: gh2, stateStore, snapshotService: svc2 });
+
+    const warmRes = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(warmRes.status).toBe(200);
+    expect(warmRes.headers.get('x-ghcc-refreshing')).toBe('1');
+
+    const waitPromise = getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot?wait=1')),
+    );
+    releaseSecondSnapshot();
+    const freshRes = await waitPromise;
+    expect(freshRes.status).toBe(200);
+    expect(freshRes.headers.get('x-ghcc-refreshing')).toBeNull();
+    const freshBody = (await freshRes.json()) as SnapshotResponse;
+    expect(freshBody.fetchedAt).toBe(new Date(nowMs).toISOString());
   });
 
   it('handles HTTP 200 GraphQL partial FORBIDDEN/SSO error and strips secret query params', async () => {
@@ -1242,14 +1326,15 @@ describe('API routes (mocked fetch)', () => {
     );
     expect(repoLabelFetches).toBe(1);
 
-    // PR detail is cached within 30s and invalidated by mutations
-    await getPullDetail(
+    // PR detail is cached within 30s on server, sends Cache-Control: no-cache, and invalidates on mutations and manual refresh
+    const detailRes = await getPullDetail(
       makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
         owner: 'acme',
         repo: 'core-api',
         number: '42',
       }),
     );
+    expect(detailRes.headers.get('cache-control')).toBe('no-cache');
     await getPullDetail(
       makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
         owner: 'acme',
@@ -1282,5 +1367,27 @@ describe('API routes (mocked fetch)', () => {
       }),
     );
     expect(pullDetailFetches).toBe(2);
+
+    const refreshRes = await postRefresh(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/refresh', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+          },
+        }),
+      ),
+    );
+    expect(refreshRes.status).toBe(200);
+    await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
+        owner: 'acme',
+        repo: 'core-api',
+        number: '42',
+      }),
+    );
+    expect(pullDetailFetches).toBe(3);
   });
 });

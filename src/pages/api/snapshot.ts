@@ -17,9 +17,17 @@ function matchesIfNoneMatch(header: string | null, etag: string): boolean {
 
 export const GET: APIRoute = async ({ request }) => {
   const { snapshotService } = getRuntime();
-  const result = await snapshotService.getSnapshot();
+  const url = new URL(request.url);
+  const waitForInFlight = url.searchParams.get('wait') === '1';
+  const result = await snapshotService.getSnapshot({ waitForInFlight });
+  const refreshingHeader: Record<string, string> = result.isRefreshing
+    ? { 'x-ghcc-refreshing': '1' }
+    : {};
 
-  if (matchesIfNoneMatch(request.headers.get('if-none-match'), result.etag)) {
+  if (
+    !result.isRefreshing &&
+    matchesIfNoneMatch(request.headers.get('if-none-match'), result.etag)
+  ) {
     return new Response(null, {
       status: 304,
       headers: {
@@ -35,6 +43,7 @@ export const GET: APIRoute = async ({ request }) => {
       'content-type': 'application/json; charset=utf-8',
       etag: result.etag,
       'cache-control': 'no-cache',
+      ...refreshingHeader,
     },
   });
 };

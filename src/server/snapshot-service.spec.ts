@@ -66,7 +66,7 @@ describe('snapshot-service & state machine', () => {
     expect(transitionLifecycleState('auth-error', 'MANUAL_RETRY', false)).toBe('loading');
   });
 
-  it('coalesces concurrent requests (single-flight) and caches within 90s TTL', async () => {
+  it('coalesces concurrent requests (single-flight) and caches within 55s TTL so 60s polls refresh', async () => {
     let nowMs = FIXTURE_NOW_MS;
     const stateStore = await makeStateStore();
     const fetchAuthoredPulls = vi.fn<GitHubClient['fetchAuthoredPulls']>().mockResolvedValue({
@@ -112,24 +112,38 @@ describe('snapshot-service & state machine', () => {
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
     expect(fetchReviewQueue).toHaveBeenCalledTimes(1);
 
-    // Within 90s TTL -> serves cached snapshot
+    // Within 55s TTL -> serves cached snapshot
     nowMs += 30_000;
     await service.getSnapshot();
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
 
-    // Past 90s TTL -> refreshes both
-    nowMs += 65_000;
+    // At 60s (past 55s TTL) -> refreshes both
+    nowMs += 30_000;
     await service.getSnapshot();
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(2);
     expect(fetchReviewQueue).toHaveBeenCalledTimes(2);
   });
 
-  it('enforces 10s manual refresh cooldown and keeps 90s review-queue TTL floor', async () => {
+  it('enforces 10s manual refresh cooldown and bypasses review-queue, repo, detail, and mergeability caches', async () => {
     let nowMs = FIXTURE_NOW_MS;
     const stateStore = await makeStateStore();
+    const unknownMergePr = makeBaseRawPr({
+      id: 'PR_manual_probe',
+      number: 801,
+      headRefOid: 'sha-manual-probe',
+      mergeable: 'UNKNOWN',
+      mergeStateStatus: 'UNKNOWN',
+    });
+    await stateStore.setMergeability('acme/web-app#801', {
+      headRefOid: 'sha-manual-probe',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      checkedAt: new Date(nowMs - 30_000).toISOString(),
+    });
+
     const fetchAuthoredPulls = vi.fn<GitHubClient['fetchAuthoredPulls']>().mockResolvedValue({
       login: VIEWER_LOGIN,
-      pullRequests: [fixtureAutoMerge],
+      pullRequests: [fixtureAutoMerge, unknownMergePr],
       rateLimit: null,
       warnings: [],
       cost: 1,
@@ -140,22 +154,32 @@ describe('snapshot-service & state machine', () => {
       warnings: [],
       cost: 1,
     });
+    const fetchRepoPulls = vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+      pullRequests: [],
+      rateLimit: null,
+      warnings: [],
+      cost: 1,
+    });
+    const probeMergeability = vi.fn<GitHubClient['probeMergeability']>().mockResolvedValue({
+      status: 'ok',
+      mergeable: false,
+      mergeableState: 'dirty',
+      coreRateLimit: null,
+    });
+    const invalidatePullDetailCache =
+      vi.fn<NonNullable<GitHubClient['invalidatePullDetailCache']>>();
     const client: GitHubClient = {
       fetchAuthoredPulls,
       fetchReviewQueue,
-      probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
+      probeMergeability,
       fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
-      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
-        pullRequests: [],
-        rateLimit: null,
-        warnings: [],
-        cost: 0,
-      }),
+      fetchRepoPulls,
       updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
       setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
       mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
+      invalidatePullDetailCache,
     };
 
     const service = createSnapshotService({
@@ -165,19 +189,28 @@ describe('snapshot-service & state machine', () => {
       now: () => nowMs,
     });
 
-    await service.forceRefresh();
+    const first = await service.forceRefresh();
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
     expect(fetchReviewQueue).toHaveBeenCalledTimes(1);
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(2);
+    expect(probeMergeability).toHaveBeenCalledTimes(1);
+    expect(invalidatePullDetailCache).toHaveBeenCalledTimes(1);
+    expect(first.snapshot.pullRequests.find((p) => p.number === 801)?.merge.state).toBe(
+      'conflicting',
+    );
 
     // Within 10s -> throws cooldown error
     nowMs += 5_000;
     await expect(service.forceRefresh()).rejects.toBeInstanceOf(RefreshCooldownError);
 
-    // At 15s -> authored refreshes, review queue stays cached by 90s floor!
+    // At 15s -> manual refresh bypasses review-queue, repo, and detail caches
     nowMs += 10_000;
     await service.forceRefresh();
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(2);
-    expect(fetchReviewQueue).toHaveBeenCalledTimes(1);
+    expect(fetchReviewQueue).toHaveBeenCalledTimes(2);
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(4);
+    expect(probeMergeability).toHaveBeenCalledTimes(2);
+    expect(invalidatePullDetailCache).toHaveBeenCalledTimes(2);
   });
 
   it('enters rate-limited retaining cached PRs on 403 and recovers after resetAt + 5s', async () => {
@@ -370,7 +403,7 @@ describe('snapshot-service & state machine', () => {
     expect(team?.bucket).toBe('waiting');
   });
 
-  it('caches repo PRs per repository for 5m, preserves cached repo PRs on transient failure, and supports targeted invalidation', async () => {
+  it('caches repo PRs per repository for 2m, preserves cached repo PRs on transient failure, and supports targeted invalidation', async () => {
     let nowMs = FIXTURE_NOW_MS;
     const stateStore = await makeStateStore();
     const otherRepoPr = {
@@ -456,16 +489,21 @@ describe('snapshot-service & state machine', () => {
     expect(first.snapshot.pullRequests).toHaveLength(4);
     expect(fetchRepoPulls).toHaveBeenCalledTimes(2);
 
-    // At 2 minutes (past 90s snapshot TTL, within 5m repo TTL) -> reuses cached repo PRs
-    nowMs += 120_000;
+    // At 60s (past 55s snapshot TTL, within 2m repo TTL) -> reuses cached repo PRs
+    nowMs += 60_000;
     await service.getSnapshot();
     expect(fetchRepoPulls).toHaveBeenCalledTimes(2);
+
+    // At 130s (past 2m repo TTL) -> refreshes both repos
+    nowMs += 70_000;
+    await service.getSnapshot();
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(4);
 
     // Targeted invalidation of acme/docs only refetches acme/docs, NOT acme/frontend
     service.invalidateCache('acme/docs');
     failDocsRepo = true;
     const degraded = await service.getSnapshot();
-    expect(fetchRepoPulls).toHaveBeenCalledTimes(3);
+    expect(fetchRepoPulls).toHaveBeenCalledTimes(5);
     expect(fetchRepoPulls).toHaveBeenLastCalledWith('acme', 'docs');
     expect(degraded.snapshot.state).toBe('degraded');
     // Cached PRs from acme/docs are preserved instead of vanishing
@@ -519,7 +557,7 @@ describe('snapshot-service & state machine', () => {
     // Wait a tick for best-effort disk persistence to flush
     await stateStore.getLastSnapshot();
 
-    // New service instance (simulating server restart) within 90s serves persisted snapshot without hitting GitHub
+    // New service instance (simulating server restart) within 55s serves persisted snapshot without hitting GitHub
     nowMs += 20_000;
     const service2 = createSnapshotService({
       tokenStore: makeTokenStore(),
@@ -529,6 +567,97 @@ describe('snapshot-service & state machine', () => {
     });
     const warmed = await service2.getSnapshot();
     expect(warmed.snapshot.pullRequests).toHaveLength(1);
+    expect(warmed.isRefreshing).toBe(false);
+    expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
+
+    // Restart after persisted snapshot is stale (> 55s): returns disk cache with isRefreshing=true,
+    // and waitForInFlight=true joins the background refresh and returns fresh data.
+    let resolveBackgroundFetch!: (
+      value: Awaited<ReturnType<GitHubClient['fetchAuthoredPulls']>>,
+    ) => void;
+    fetchAuthoredPulls.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveBackgroundFetch = resolve;
+        }),
+    );
+    nowMs += 120_000;
+    const service3 = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => nowMs,
+    });
+    const staleWarm = await service3.getSnapshot();
+    expect(staleWarm.snapshot.pullRequests).toHaveLength(1);
+    expect(staleWarm.isRefreshing).toBe(true);
+    expect(fetchAuthoredPulls).toHaveBeenCalledTimes(2);
+
+    const waitedPromise = service3.getSnapshot({ waitForInFlight: true });
+    resolveBackgroundFetch({
+      login: VIEWER_LOGIN,
+      pullRequests: [fixtureNoCiRollup, fixtureAutoMerge],
+      rateLimit: null,
+      warnings: [],
+      cost: 1,
+    });
+    const fresh = await waitedPromise;
+    expect(fresh.snapshot.pullRequests).toHaveLength(2);
+    expect(fresh.isRefreshing).toBeFalsy();
+    expect(fetchAuthoredPulls).toHaveBeenCalledTimes(2);
+  });
+
+  it('stamps fetchedAt and cache TTL at fetch completion time so slow refreshes show as fresh', async () => {
+    let nowMs = FIXTURE_NOW_MS;
+    const stateStore = await makeStateStore();
+    const fetchAuthoredPulls = vi
+      .fn<GitHubClient['fetchAuthoredPulls']>()
+      .mockImplementation(async () => {
+        nowMs += 25_000;
+        return {
+          login: VIEWER_LOGIN,
+          pullRequests: [fixtureNoCiRollup],
+          rateLimit: null,
+          warnings: [],
+          cost: 1,
+        };
+      });
+    const client: GitHubClient = {
+      fetchAuthoredPulls,
+      fetchReviewQueue: vi.fn<GitHubClient['fetchReviewQueue']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 1,
+      }),
+      fetchRepoPulls: vi.fn<GitHubClient['fetchRepoPulls']>().mockResolvedValue({
+        pullRequests: [],
+        rateLimit: null,
+        warnings: [],
+        cost: 0,
+      }),
+      probeMergeability: vi.fn<GitHubClient['probeMergeability']>(),
+      fetchPullDetail: vi.fn<GitHubClient['fetchPullDetail']>(),
+      updatePullBranch: vi.fn<GitHubClient['updatePullBranch']>(),
+      setPullDraftState: vi.fn<GitHubClient['setPullDraftState']>(),
+      mergePullRequest: vi.fn<GitHubClient['mergePullRequest']>(),
+      fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
+      setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
+    };
+
+    const service = createSnapshotService({
+      tokenStore: makeTokenStore(),
+      githubClient: client,
+      stateStore,
+      now: () => nowMs,
+    });
+
+    const result = await service.getSnapshot();
+    expect(result.snapshot.fetchedAt).toBe(new Date(FIXTURE_NOW_MS + 25_000).toISOString());
+
+    // 40s after completion is still within 55s TTL (would have been 65s from startMs!)
+    nowMs += 40_000;
+    await service.getSnapshot();
     expect(fetchAuthoredPulls).toHaveBeenCalledTimes(1);
   });
 

@@ -3,9 +3,9 @@ import type { ProbeMergeabilityResult } from '@/server/github-client';
 import type { StateStore } from '@/server/state-store';
 import type { PrMergeInfo } from '@/types/pr';
 
-export const MERGEABILITY_CACHE_TTL_MS = 15 * 60 * 1000;
+export const MERGEABILITY_CACHE_TTL_MS = 3 * 60 * 1000;
 export const MAX_PROBES_PER_REFRESH = 5;
-export const MAX_PROBES_PER_PR_PER_HOUR = 2;
+export const MAX_PROBES_PER_PR_PER_HOUR = 6;
 
 export interface MergeabilityContext {
   stateStore: StateStore;
@@ -18,6 +18,7 @@ export interface MergeabilityContext {
   nowMs?: number;
   probeBudget?: { remaining: number };
   isBehindBase?: boolean;
+  bypassCache?: boolean;
 }
 
 export interface ResolvedMergeability {
@@ -92,15 +93,19 @@ export async function resolveMergeability(
   const nowIso = new Date(nowMs).toISOString();
   const prKey = `${raw.repository.nameWithOwner}#${raw.number}`;
 
-  // Rule 1: GraphQL mergeable when known -> persist under headRefOid and return 'fresh'.
+  // Rule 1: GraphQL mergeable when known -> persist under (headRefOid, baseRefOid) and return 'fresh'.
   if (raw.mergeable !== 'UNKNOWN') {
     const existing = await ctx.stateStore.getMergeability(prKey);
+    const matchesExistingRef =
+      existing?.headRefOid === raw.headRefOid &&
+      (!existing.baseRefOid || !raw.baseRefOid || existing.baseRefOid === raw.baseRefOid);
     await ctx.stateStore.setMergeability(prKey, {
       headRefOid: raw.headRefOid,
+      ...(raw.baseRefOid ? { baseRefOid: raw.baseRefOid } : {}),
       mergeable: raw.mergeable,
       mergeStateStatus: raw.mergeStateStatus,
       checkedAt: nowIso,
-      etag: existing?.headRefOid === raw.headRefOid ? existing.etag : undefined,
+      etag: matchesExistingRef ? existing?.etag : undefined,
     });
     return {
       merge: {
@@ -113,10 +118,15 @@ export async function resolveMergeability(
   }
 
   const cached = await ctx.stateStore.getMergeability(prKey);
-  const sameHeadCache = cached && cached.headRefOid === raw.headRefOid ? cached : null;
+  const sameHeadCache =
+    cached &&
+    cached.headRefOid === raw.headRefOid &&
+    (!cached.baseRefOid || !raw.baseRefOid || cached.baseRefOid === raw.baseRefOid)
+      ? cached
+      : null;
 
-  // Rule 2: GraphQL UNKNOWN with fresh cached value for same headRefOid (<= 15m).
-  if (sameHeadCache) {
+  // Rule 2: GraphQL UNKNOWN with fresh cached value for same (headRefOid, baseRefOid) (<= 3m).
+  if (sameHeadCache && !ctx.bypassCache) {
     const ageMs = nowMs - Date.parse(sameHeadCache.checkedAt);
     if (Number.isFinite(ageMs) && ageMs <= MERGEABILITY_CACHE_TTL_MS) {
       const effectiveStatus =
@@ -132,7 +142,7 @@ export async function resolveMergeability(
     }
   }
 
-  // Rule 3: Probe REST endpoint when budget allows (<= 5 per refresh, <= 2/hr/PR/headRefOid).
+  // Rule 3: Probe REST endpoint when budget allows (<= 5 per refresh, <= 6/hr/PR/headRefOid).
   const budget = ctx.probeBudget ?? { remaining: MAX_PROBES_PER_REFRESH };
   if (ctx.probeFn && budget.remaining > 0) {
     const recentCount = await ctx.stateStore.getRecentProbeCount(prKey, raw.headRefOid, nowMs);
@@ -145,6 +155,7 @@ export async function resolveMergeability(
         if (probe.status === 'not-modified' && sameHeadCache) {
           await ctx.stateStore.setMergeability(prKey, {
             ...sameHeadCache,
+            ...(raw.baseRefOid ? { baseRefOid: raw.baseRefOid } : {}),
             checkedAt: nowIso,
           });
           const effectiveStatus =
@@ -166,6 +177,7 @@ export async function resolveMergeability(
             normalizeRestMergeableState(probe.mergeableState) ?? raw.mergeStateStatus;
           await ctx.stateStore.setMergeability(prKey, {
             headRefOid: raw.headRefOid,
+            ...(raw.baseRefOid ? { baseRefOid: raw.baseRefOid } : {}),
             mergeable: resolvedMergeable,
             mergeStateStatus: effectiveStatus,
             checkedAt: nowIso,

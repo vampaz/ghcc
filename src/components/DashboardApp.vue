@@ -6,6 +6,8 @@
       :viewer-login="snapshot?.viewer.login"
       :fetched-at="snapshot?.fetchedAt"
       :now-ms="nowMs"
+      :next-refresh-at-ms="nextRefreshAtMs"
+      :recently-updated="recentlyUpdated"
       :is-stale="isStale"
       :client-state="clientState"
       :server-state="snapshot?.state"
@@ -219,6 +221,8 @@ const {
   clientState,
   snapshot,
   nowMs,
+  nextRefreshAtMs,
+  recentlyUpdated,
   pollIntervalMs,
   isStale,
   offlineMessage,
@@ -412,7 +416,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .merge-menu-popover, .label-picker-popover';
+  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .merge-menu-popover, .label-picker-popover, .refresh-btn';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {

@@ -13,14 +13,33 @@
         <span>{{ viewerLogin ? `@${viewerLogin}` : 'connecting' }}</span>
       </span>
 
-      <span class="freshness-text tabular" :class="{ stale: isStale }">
-        <template v-if="clientState === 'refreshing'">refreshing...</template>
-        <template v-else-if="fetchedAt">
-          updated {{ formatRelativeAge(fetchedAt, nowMs) }}
-          <span v-if="isStale" class="stale-badge">(stale)</span>
-        </template>
-        <template v-else>initializing...</template>
-      </span>
+      <div class="freshness-pill tabular" :data-state="freshnessState" :title="freshnessTitle">
+        <progress
+          v-if="isRefreshing"
+          class="loading-spinner freshness-spinner"
+          aria-label="Refreshing pull requests from GitHub"
+        ></progress>
+        <span v-else class="freshness-dot" aria-hidden="true"></span>
+        <span class="freshness-text" :class="{ stale: isStale }">
+          <template v-if="clientState === 'initializing' && !fetchedAt">
+            Loading from GitHub…
+          </template>
+          <template v-else-if="isRefreshing"> Refreshing… </template>
+          <template v-else-if="clientState === 'offline'">
+            Offline<template v-if="fetchedAt">
+              · cached {{ formatRelativeAge(fetchedAt, nowMs) }}</template
+            >
+          </template>
+          <template v-else-if="fetchedAt">
+            Updated {{ formatRelativeAge(fetchedAt, nowMs) }}
+            <span v-if="isStale" class="stale-badge">(stale)</span>
+            <span v-else-if="nextRefreshLabel" class="freshness-next">
+              · next {{ nextRefreshLabel }}
+            </span>
+          </template>
+          <template v-else>Initializing…</template>
+        </span>
+      </div>
     </div>
 
     <div class="header-right">
@@ -73,7 +92,7 @@
       <button
         type="button"
         class="header-btn refresh-btn"
-        :aria-disabled="clientState === 'refreshing' ? 'true' : undefined"
+        :aria-disabled="isRefreshing ? 'true' : undefined"
         aria-keyshortcuts="r"
         @click="onRefreshClick"
       >
@@ -81,7 +100,7 @@
           name="renew"
           :size="15"
           class="refresh-glyph"
-          :class="{ spinning: clientState === 'refreshing' }"
+          :class="{ spinning: isRefreshing }"
         />
         <span>Refresh</span>
       </button>
@@ -95,12 +114,14 @@ import CarbonIcon from '@/components/CarbonIcon.vue';
 import type { ClientUiState } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
 import type { RateLimitBucket, SnapshotState } from '@/types/pr';
-import { formatRelativeAge } from '@/utils/format';
+import { formatRelativeAge, formatResetCountdown } from '@/utils/format';
 
 interface Props {
   viewerLogin?: string;
   fetchedAt?: string;
   nowMs: number;
+  nextRefreshAtMs?: number | null;
+  recentlyUpdated?: boolean;
   isStale: boolean;
   clientState: ClientUiState;
   serverState?: SnapshotState;
@@ -115,6 +136,8 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   viewerLogin: '',
   fetchedAt: '',
+  nextRefreshAtMs: null,
+  recentlyUpdated: false,
   serverState: undefined,
   rateLimit: undefined,
 });
@@ -144,6 +167,59 @@ const isRateLimitLow = computed<boolean>(() => {
   return buckets.some((b) => b && b.limit > 0 && b.remaining / b.limit < 0.2);
 });
 
+const isRefreshing = computed<boolean>(
+  () =>
+    props.clientState === 'refreshing' ||
+    (props.clientState === 'initializing' && !props.fetchedAt),
+);
+
+const freshnessState = computed<'refreshing' | 'just-updated' | 'live' | 'stale' | 'offline'>(
+  () => {
+    if (isRefreshing.value) {
+      return 'refreshing';
+    }
+    if (props.clientState === 'offline') {
+      return 'offline';
+    }
+    if (props.isStale) {
+      return 'stale';
+    }
+    if (props.recentlyUpdated) {
+      return 'just-updated';
+    }
+    return 'live';
+  },
+);
+
+const nextRefreshLabel = computed<string>(() => {
+  if (
+    props.serverState === 'rate-limited' ||
+    props.serverState === 'auth-error' ||
+    props.serverState === 'fatal'
+  ) {
+    return 'paused';
+  }
+  if (props.nextRefreshAtMs === null) {
+    return '';
+  }
+  const remainingMs = props.nextRefreshAtMs - props.nowMs;
+  if (remainingMs <= 1_000) {
+    return 'soon';
+  }
+  return `in ${formatResetCountdown(new Date(props.nextRefreshAtMs).toISOString(), props.nowMs)}`;
+});
+
+const freshnessTitle = computed<string | undefined>(() => {
+  if (!props.fetchedAt) {
+    return undefined;
+  }
+  const ts = Date.parse(props.fetchedAt);
+  if (!Number.isFinite(ts)) {
+    return undefined;
+  }
+  return `Last synced at ${new Date(ts).toLocaleTimeString()}`;
+});
+
 const themeButtonLabel = computed<string>(() => {
   return props.resolvedTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
 });
@@ -154,7 +230,7 @@ function onPollChange(event: Event): void {
 }
 
 function onRefreshClick(): void {
-  if (props.clientState === 'refreshing') {
+  if (isRefreshing.value) {
     return;
   }
   emit('refresh');
@@ -230,13 +306,88 @@ function onRefreshClick(): void {
   background-color: var(--accent-red);
 }
 
-.freshness-text {
-  font-size: 0.8125rem;
+.freshness-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.16rem 0.58rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  font-size: 0.78rem;
   color: var(--ink-secondary);
+  transition:
+    background-color 220ms ease,
+    border-color 220ms ease,
+    color 220ms ease;
+}
+
+.freshness-pill[data-state='refreshing'] {
+  border-color: color-mix(in srgb, var(--accent-blue) 45%, var(--border-subtle));
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  font-weight: 500;
+}
+
+.freshness-pill[data-state='just-updated'] {
+  border-color: color-mix(in srgb, var(--accent-emerald) 55%, var(--border-subtle));
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+  font-weight: 500;
+}
+
+.freshness-pill[data-state='stale'] {
+  border-color: color-mix(in srgb, var(--accent-amber) 50%, var(--border-subtle));
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+  font-weight: 600;
+}
+
+.freshness-pill[data-state='offline'] {
+  border-color: color-mix(in srgb, var(--accent-red) 50%, var(--border-subtle));
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  font-weight: 600;
+}
+
+.freshness-dot {
+  inline-size: 0.44rem;
+  block-size: 0.44rem;
+  border-radius: 999px;
+  background-color: var(--accent-emerald);
+  flex: 0 0 auto;
+}
+
+.freshness-pill[data-state='stale'] .freshness-dot {
+  background-color: var(--accent-amber);
+}
+
+.freshness-pill[data-state='offline'] .freshness-dot {
+  background-color: var(--accent-red);
+}
+
+.freshness-spinner {
+  --size: 0.78rem;
+}
+
+.freshness-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.freshness-next {
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+.freshness-pill[data-state='just-updated'] .freshness-next {
+  color: inherit;
+  opacity: 0.85;
 }
 
 .freshness-text.stale {
-  color: var(--accent-amber);
+  color: inherit;
   font-weight: 600;
 }
 
@@ -302,6 +453,9 @@ function onRefreshClick(): void {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .freshness-pill {
+    transition: none;
+  }
   .refresh-glyph.spinning {
     animation: none;
   }

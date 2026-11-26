@@ -23,9 +23,9 @@ import type {
   SnapshotWarning,
 } from '@/types/pr';
 
-export const SNAPSHOT_TTL_MS = 90_000;
-export const REVIEW_QUEUE_TTL_MS = 90_000;
-export const REPO_PULLS_TTL_MS = 5 * 60_000;
+export const SNAPSHOT_TTL_MS = 55_000;
+export const REVIEW_QUEUE_TTL_MS = 55_000;
+export const REPO_PULLS_TTL_MS = 2 * 60_000;
 export const PERSISTED_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 export const MANUAL_REFRESH_COOLDOWN_MS = 10_000;
 export const RATE_LIMIT_BACKOFF_BUFFER_MS = 5_000;
@@ -106,6 +106,7 @@ export function transitionLifecycleState(
 export interface SnapshotResult {
   snapshot: SnapshotResponse;
   etag: string;
+  isRefreshing?: boolean;
 }
 
 export class RefreshCooldownError extends Error {
@@ -125,8 +126,12 @@ export interface SnapshotServiceDeps {
   now?: () => number;
 }
 
+export interface GetSnapshotOptions {
+  waitForInFlight?: boolean;
+}
+
 export interface SnapshotService {
-  getSnapshot(): Promise<SnapshotResult>;
+  getSnapshot(options?: GetSnapshotOptions): Promise<SnapshotResult>;
   forceRefresh(): Promise<SnapshotResult>;
   invalidateCache(repoKey?: string): void;
   getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState };
@@ -299,7 +304,9 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
 
       let reviewPulls: RawPullRequest[] = [];
       const canReuseReviewQueue =
-        cachedReviewQueue !== null && startMs - cachedReviewQueue.fetchedAtMs < REVIEW_QUEUE_TTL_MS;
+        !isManual &&
+        cachedReviewQueue !== null &&
+        startMs - cachedReviewQueue.fetchedAtMs < REVIEW_QUEUE_TTL_MS;
 
       if (canReuseReviewQueue && cachedReviewQueue) {
         reviewPulls = cachedReviewQueue.pullRequests;
@@ -312,7 +319,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
           }
           reviewPulls = review.pullRequests;
           cachedReviewQueue = {
-            fetchedAtMs: startMs,
+            fetchedAtMs: now(),
             pullRequests: review.pullRequests,
             warnings: review.warnings,
           };
@@ -352,7 +359,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
 
         for (const fullName of activeRepos) {
           const cached = repoPullsCache.get(fullName);
-          if (cached && startMs - cached.fetchedAtMs < REPO_PULLS_TTL_MS) {
+          if (!isManual && cached && startMs - cached.fetchedAtMs < REPO_PULLS_TTL_MS) {
             collected.push(...cached.pullRequests);
             repoWarnings.push(...cached.warnings);
           } else {
@@ -380,7 +387,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
                   lastGraphqlLimit = res.rateLimit;
                 }
                 repoPullsCache.set(fullName, {
-                  fetchedAtMs: startMs,
+                  fetchedAtMs: now(),
                   pullRequests: res.pullRequests,
                   warnings: res.warnings,
                 });
@@ -495,6 +502,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         stateStore: deps.stateStore,
         nowMs: startMs,
         draftBehindByKey,
+        bypassMergeabilityCache: isManual,
         probeFn: async (owner, repo, number, etag) => {
           try {
             const res = await deps.githubClient.probeMergeability(owner, repo, number, etag);
@@ -526,6 +534,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         });
       }
 
+      const completedMs = now();
       const uniqueWarnings = dedupeWarnings(warnings);
       const isDegraded = reviewFailed || repoPullsFailed || uniqueWarnings.length > 0;
       lifecycle = transitionLifecycleState(
@@ -534,11 +543,11 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         true,
       );
       scheduler = 'scheduled';
-      lastSnapshotAtMs = startMs;
+      lastSnapshotAtMs = completedMs;
       backoffUntilMs = 0;
 
       const snapshot: SnapshotResponse = {
-        fetchedAt: new Date(startMs).toISOString(),
+        fetchedAt: new Date(completedMs).toISOString(),
         viewer: { login: lastLogin },
         state: lifecycle === 'degraded' ? 'degraded' : 'ready',
         counts: computeCounts(normalized.pullRequests),
@@ -556,11 +565,9 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       cachedResult = result;
       persistedHydrated = true;
       if (snapshot.state === 'ready' || snapshot.pullRequests.length > 0) {
-        await deps.stateStore
-          .setLastSnapshot(snapshot, new Date(startMs).toISOString())
-          .catch(() => {
-            // Best-effort cache persistence; ignore disk errors.
-          });
+        await deps.stateStore.setLastSnapshot(snapshot, snapshot.fetchedAt).catch(() => {
+          // Best-effort cache persistence; ignore disk errors.
+        });
       }
       return result;
     } catch (error) {
@@ -621,29 +628,46 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
   }
 
   return {
-    async getSnapshot(): Promise<SnapshotResult> {
+    async getSnapshot(options: GetSnapshotOptions = {}): Promise<SnapshotResult> {
       const currentMs = now();
       const wasIdle = lifecycle === 'idle' && !cachedResult;
       await hydrateFromDiskIfNeeded(currentMs);
+
+      if (options.waitForInFlight && inFlight) {
+        return inFlight;
+      }
+
       if (wasIdle && cachedResult) {
-        return cachedResult;
+        return {
+          ...cachedResult,
+          isRefreshing: inFlight !== null,
+        };
       }
 
       if (lifecycle === 'rate-limited') {
         if (currentMs < backoffUntilMs && cachedResult) {
-          return cachedResult;
+          return {
+            ...cachedResult,
+            isRefreshing: inFlight !== null,
+          };
         }
         return triggerFetch(false);
       }
 
       if (lifecycle === 'auth-error' || lifecycle === 'fatal') {
         if (cachedResult) {
-          return cachedResult;
+          return {
+            ...cachedResult,
+            isRefreshing: inFlight !== null,
+          };
         }
       }
 
       if (cachedResult && currentMs - lastSnapshotAtMs < SNAPSHOT_TTL_MS) {
-        return cachedResult;
+        return {
+          ...cachedResult,
+          isRefreshing: inFlight !== null,
+        };
       }
 
       return triggerFetch(false);
@@ -666,6 +690,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       }
 
       lastManualRefreshAtMs = currentMs;
+      deps.githubClient.invalidatePullDetailCache?.();
       return triggerFetch(true);
     },
 

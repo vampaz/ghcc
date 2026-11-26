@@ -55,6 +55,10 @@ npm run start
 - **Secrets hygiene**: never print, log, serialize, or commit GitHub tokens or `.env` files.
 - **Same-origin `POST` protection** (`src/server/origin-guard.ts` and `astro.config.mjs`): Same-origin `POST` endpoints (`/api/refresh`, `/api/pull/.../update-branch`, `/api/pull/.../draft`) work on any host by default as long as `Sec-Fetch-Site` and `Origin` match `Host`/`X-Forwarded-Host`. Optionally set comma-separated hostnames in `GHCC_ALLOWED_HOSTS` (also passed as a Docker build arg into `astro.config.mjs` `security.allowedDomains`) to restrict `POST` requests to loopback plus an explicit allowlist.
 
+## Git Policy
+
+- **Direct `master` commits and pushes authorized**: In this repository, agents are authorized to stage, commit directly on local `master`, and push to `origin/master` once validation and the completion gate pass. This explicitly overrides the global protected-`master` restriction for `ghcc`.
+
 ## Validation Checks
 
 Run before completing changes:

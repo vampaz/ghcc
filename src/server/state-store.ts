@@ -4,6 +4,7 @@ import type { SnapshotResponse } from '@/types/pr';
 
 export interface CachedMergeabilityEntry {
   headRefOid: string;
+  baseRefOid?: string;
   mergeable: 'MERGEABLE' | 'CONFLICTING';
   mergeStateStatus?: string;
   checkedAt: string;

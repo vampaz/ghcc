@@ -582,7 +582,7 @@ export interface GitHubClient {
   ): Promise<MergePullResponse>;
   fetchRepoLabels(owner: string, repo: string): Promise<PrLabel[]>;
   setPullLabels(owner: string, repo: string, number: number, labels: string[]): Promise<PrLabel[]>;
-  invalidatePullDetailCache?(owner: string, repo: string, number: number): void;
+  invalidatePullDetailCache?(owner?: string, repo?: string, number?: number): void;
 }
 
 export interface GitHubClientDeps {
@@ -782,7 +782,11 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   const repoLabelsCache = new Map<string, { fetchedAtMs: number; value: PrLabel[] }>();
   const repoLabelsInFlight = new Map<string, Promise<PrLabel[]>>();
 
-  function invalidatePullDetailCache(owner: string, repo: string, number: number): void {
+  function invalidatePullDetailCache(owner?: string, repo?: string, number?: number): void {
+    if (owner === undefined || repo === undefined || number === undefined) {
+      pullDetailCache.clear();
+      return;
+    }
     pullDetailCache.delete(`${owner}/${repo}#${number}`);
   }
 
