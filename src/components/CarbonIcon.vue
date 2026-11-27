@@ -19,8 +19,10 @@ export type CarbonIconName =
   | 'checkmark-filled'
   | 'chevron-down'
   | 'close'
+  | 'fit-to-screen'
   | 'in-progress'
   | 'launch'
+  | 'maximize'
   | 'moon'
   | 'renew'
   | 'subtract'
@@ -28,7 +30,9 @@ export type CarbonIconName =
   | 'tag'
   | 'terminal'
   | 'warning-alt'
-  | 'warning-filled';
+  | 'warning-filled'
+  | 'zoom-in'
+  | 'zoom-out';
 
 interface Props {
   name: CarbonIconName;

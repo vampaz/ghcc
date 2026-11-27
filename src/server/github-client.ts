@@ -1,6 +1,7 @@
 import type { TokenStore } from '@/server/auth';
 import type { RawPullRequest } from '@/server/derive/types';
 import { redactToken, sanitizeErrorMessage } from '@/server/redact';
+import { sanitizePrBodyHtml } from '@/server/sanitize-pr-html';
 import type {
   MergeMethod,
   MergePullResponse,
@@ -205,6 +206,7 @@ query PullDetail($owner: String!, $repo: String!, $number: Int!) {
       url
       isDraft
       bodyText
+      bodyHTML
       baseRefName
       headRefName
       latestReviews(first: 30) {
@@ -1312,6 +1314,7 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
               url: string;
               isDraft: boolean;
               bodyText: string;
+              bodyHTML?: string | null;
               baseRefName: string;
               headRefName: string;
               latestReviews: {
@@ -1425,6 +1428,7 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
 
         const rawBody = (pr.bodyText ?? '').trim();
         const bodyExcerpt = rawBody.length > 420 ? `${rawBody.slice(0, 417)}...` : rawBody;
+        const bodyHtml = sanitizePrBodyHtml(pr.bodyHTML, rawBody);
 
         const detail: PrDetailResponse = {
           key: `${safeOwner}/${safeRepo}#${pr.number}`,
@@ -1437,6 +1441,7 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
           headRefName: pr.headRefName,
           isDraft: pr.isDraft,
           bodyExcerpt,
+          bodyHtml,
           checksTotalCount: rollup?.contexts.totalCount ?? checks.length,
           checks,
           reviewers: Array.from(reviewerMap.values()),

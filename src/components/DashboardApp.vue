@@ -86,6 +86,7 @@
               :pr="pr"
               :inspector="inspector"
               :now-ms="nowMs"
+              :resolved-theme="resolvedTheme"
               :sync-state="syncStates[pr.key]"
               :draft-state="draftStates[pr.key]"
               :merge-state="mergeStates[pr.key]"
@@ -99,6 +100,7 @@
               @load-labels="onLoadLabels"
               @retry-load-labels="onRetryLoadLabels"
               @update-labels="updatePullLabels"
+              @open-mermaid="openMermaidFullscreen(pr, $event)"
             />
           </template>
         </ActionQueue>
@@ -121,6 +123,7 @@
                 :pr="pr"
                 :inspector="inspector"
                 :now-ms="nowMs"
+                :resolved-theme="resolvedTheme"
                 :sync-state="syncStates[pr.key]"
                 :draft-state="draftStates[pr.key]"
                 :merge-state="mergeStates[pr.key]"
@@ -134,6 +137,7 @@
                 @load-labels="onLoadLabels"
                 @retry-load-labels="onRetryLoadLabels"
                 @update-labels="updatePullLabels"
+                @open-mermaid="openMermaidFullscreen(pr, $event)"
               />
             </template>
           </WaitingPanel>
@@ -163,6 +167,7 @@
       :pr="selectedPr"
       :inspector="inspector"
       :now-ms="nowMs"
+      :resolved-theme="resolvedTheme"
       :sync-state="selectedPr ? syncStates[selectedPr.key] : undefined"
       :draft-state="selectedPr ? draftStates[selectedPr.key] : undefined"
       :merge-state="selectedPr ? mergeStates[selectedPr.key] : undefined"
@@ -176,6 +181,7 @@
       @load-labels="onLoadLabels"
       @retry-load-labels="onRetryLoadLabels"
       @update-labels="updatePullLabels"
+      @open-mermaid="openMermaidFullscreen(selectedPr, $event)"
     />
 
     <MergeConfirmDialog
@@ -185,6 +191,14 @@
       :merge-state="mergeConfirm.status === 'open' ? mergeStates[mergeConfirm.pr.key] : undefined"
       @close="closeMergeConfirm"
       @confirm="onConfirmMerge"
+    />
+
+    <MermaidFullscreenDialog
+      :open="mermaidFullscreen.status === 'open'"
+      :title="mermaidFullscreen.status === 'open' ? mermaidFullscreen.title : 'Mermaid diagram'"
+      :source="mermaidFullscreen.status === 'open' ? mermaidFullscreen.source : ''"
+      :resolved-theme="resolvedTheme"
+      @close="closeMermaidFullscreen"
     />
 
     <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -200,6 +214,7 @@ import AppHeader from '@/components/AppHeader.vue';
 import FilterBar from '@/components/FilterBar.vue';
 import KpiStrip from '@/components/KpiStrip.vue';
 import MergeConfirmDialog from '@/components/MergeConfirmDialog.vue';
+import MermaidFullscreenDialog from '@/components/MermaidFullscreenDialog.vue';
 import PrInspector from '@/components/PrInspector.vue';
 import WaitingPanel from '@/components/WaitingPanel.vue';
 import WarningStrip from '@/components/WarningStrip.vue';
@@ -216,6 +231,10 @@ import type { MergeMethod, PrView } from '@/types/pr';
 type MergeConfirmState =
   | { status: 'closed' }
   | { status: 'open'; pr: PrView; mergeMethod: MergeMethod };
+
+type MermaidFullscreenState =
+  | { status: 'closed' }
+  | { status: 'open'; title: string; source: string };
 
 const {
   clientState,
@@ -254,6 +273,16 @@ function onRetryLoadLabels(pr: PrView): void {
 }
 
 const mergeConfirm = ref<MergeConfirmState>({ status: 'closed' });
+const mermaidFullscreen = ref<MermaidFullscreenState>({ status: 'closed' });
+
+function openMermaidFullscreen(pr: PrView | null, source: string): void {
+  const label = pr ? `${pr.key} · ${pr.title}` : 'Mermaid diagram';
+  mermaidFullscreen.value = { status: 'open', title: label, source };
+}
+
+function closeMermaidFullscreen(): void {
+  mermaidFullscreen.value = { status: 'closed' };
+}
 
 function openMergeConfirm(pr: PrView, mergeMethod: MergeMethod): void {
   mergeConfirm.value = { status: 'open', pr, mergeMethod };
@@ -416,7 +445,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .merge-menu-popover, .label-picker-popover, .refresh-btn';
+  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .refresh-btn';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {
@@ -436,6 +465,7 @@ function onGlobalClick(event: MouseEvent): void {
     !isDesktop.value ||
     inspector.value.status === 'closed' ||
     mergeConfirm.value.status === 'open' ||
+    mermaidFullscreen.value.status === 'open' ||
     startedInProtected
   ) {
     return;
@@ -446,7 +476,13 @@ function onGlobalClick(event: MouseEvent): void {
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {
-  if (event.metaKey || event.ctrlKey || event.altKey || mergeConfirm.value.status === 'open') {
+  if (
+    event.metaKey ||
+    event.ctrlKey ||
+    event.altKey ||
+    mergeConfirm.value.status === 'open' ||
+    mermaidFullscreen.value.status === 'open'
+  ) {
     return;
   }
 

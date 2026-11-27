@@ -205,6 +205,7 @@ export function makePrDetail(pr: PrView = makePrView()): PrDetailResponse {
     headRefName: pr.headRefName,
     isDraft: pr.isDraft,
     bodyExcerpt: 'Summary of changes for this pull request.',
+    bodyHtml: '<p>Summary of changes for this pull request.</p>',
     checksTotalCount: checks.length + pr.ci.hiddenCount,
     checks,
     reviewers,

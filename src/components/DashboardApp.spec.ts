@@ -1,6 +1,7 @@
 import { flushPromises } from '@vue/test-utils';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import DashboardApp from '@/components/DashboardApp.vue';
+import { preloadPrHtmlSanitizer } from '@/utils/pr-html';
 import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
@@ -150,6 +151,7 @@ function makeDetail(): PrDetailResponse {
     headRefName: 'fix/retry-loop',
     isDraft: false,
     bodyExcerpt: 'Stabilizes backoff jitter on transient 502 responses.',
+    bodyHtml: '<p>Stabilizes backoff jitter on transient 502 responses.</p>',
     checksTotalCount: 1,
     checks: [
       {
@@ -181,6 +183,10 @@ function makeDetail(): PrDetailResponse {
 }
 
 describe('DashboardApp', () => {
+  beforeAll(async () => {
+    await preloadPrHtmlSanitizer();
+  });
+
   beforeEach(() => {
     window.history.replaceState(null, '', '/');
     Object.defineProperty(window, 'matchMedia', {
@@ -307,6 +313,7 @@ describe('DashboardApp', () => {
       number: 202,
       title: 'feat: dark theme tokens',
       bodyExcerpt: 'Adds light-dark CSS custom properties.',
+      bodyHtml: '<p>Adds light-dark CSS custom properties.</p>',
     };
 
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
@@ -1485,6 +1492,7 @@ describe('DashboardApp', () => {
             JSON.stringify({
               ...detail,
               bodyExcerpt: `Detail revision ${detailFetchCount}`,
+              bodyHtml: `<p>Detail revision ${detailFetchCount}</p>`,
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
@@ -1663,5 +1671,58 @@ describe('DashboardApp', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('opens Mermaid fullscreen modal from the inspector without closing the inspector drawer', async () => {
+    const detail = makeDetail();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/pull/acme/core-api/101') {
+        return new Response(
+          JSON.stringify({
+            ...detail,
+            bodyHtml:
+              '<h2>Summary</h2><pre class="pr-mermaid-source"><code>flowchart LR\n  A --&gt; B</code></pre>',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify(makeSnapshot()), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"mermaid-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+    const fullscreenBtn = wrapper.find('.inspector-dialog .mermaid-fullscreen-btn');
+    expect(fullscreenBtn.exists()).toBe(true);
+
+    await fullscreenBtn.trigger('click');
+    await flushPromises();
+
+    const fsDialog = wrapper.find('dialog.mermaid-fullscreen-dialog');
+    expect(fsDialog.exists()).toBe(true);
+    expect(fsDialog.attributes('open')).toBeDefined();
+    expect(fsDialog.find('.mermaid-fs-title').text()).toContain('acme/core-api#101');
+
+    // Global Escape while fullscreen modal is open must not close the right inspector
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+
+    // Closing the fullscreen modal keeps the right inspector open
+    await fsDialog.find('.mermaid-fs-close').trigger('click');
+    await flushPromises();
+    expect(fsDialog.attributes('open')).toBeUndefined();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+
+    wrapper.unmount();
   });
 });

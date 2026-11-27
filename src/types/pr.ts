@@ -187,6 +187,7 @@ export interface PrDetailResponse {
   headRefName: string;
   isDraft: boolean;
   bodyExcerpt: string;
+  bodyHtml: string;
   checksTotalCount: number;
   checks: PrDetailCheck[];
   reviewers: PrReviewerDetail[];

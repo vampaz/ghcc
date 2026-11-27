@@ -112,9 +112,21 @@
     </div>
 
     <template v-else-if="inspector.status === 'open'">
-      <p v-if="inspector.detail.bodyExcerpt" class="body-excerpt">
-        {{ inspector.detail.bodyExcerpt }}
-      </p>
+      <section class="detail-section" :aria-labelledby="descriptionHeadingId">
+        <h2 :id="descriptionHeadingId" class="detail-heading">Description</h2>
+        <PrMarkdownBody
+          v-if="inspector.detail.bodyHtml"
+          :html="inspector.detail.bodyHtml"
+          :pr-url="pr?.url ?? inspector.detail.url"
+          :pr-key="pr?.key ?? inspector.detail.key"
+          :resolved-theme="resolvedTheme"
+          @open-mermaid="$emit('open-mermaid', $event)"
+        />
+        <p v-else-if="inspector.detail.bodyExcerpt" class="body-excerpt">
+          {{ inspector.detail.bodyExcerpt }}
+        </p>
+        <p v-else class="empty-note">No description provided.</p>
+      </section>
 
       <section class="detail-section" :aria-labelledby="checksHeadingId">
         <div class="detail-heading-row">
@@ -245,6 +257,7 @@ import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
 import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
+import PrMarkdownBody from '@/components/PrMarkdownBody.vue';
 import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
@@ -258,6 +271,7 @@ import {
   type PrSyncState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
+import type { ResolvedTheme } from '@/composables/use-theme';
 import type { MergeMethod, PrView } from '@/types/pr';
 import { type CheckGroup, groupDetailChecks } from '@/utils/check-groups';
 import { formatRelativeAge } from '@/utils/format';
@@ -266,6 +280,7 @@ interface Props {
   pr: PrView | null;
   inspector: InspectorState;
   nowMs: number;
+  resolvedTheme?: ResolvedTheme;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
   mergeState?: PrMergeState;
@@ -274,6 +289,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  resolvedTheme: 'dark',
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
   mergeState: () => IDLE_PR_MERGE_STATE,
@@ -289,6 +305,7 @@ const emit = defineEmits<{
   'load-labels': [pr: PrView];
   'retry-load-labels': [pr: PrView];
   'update-labels': [pr: PrView, labels: string[]];
+  'open-mermaid': [source: string];
 }>();
 
 const showSyncAction = computed<boolean>(
@@ -318,6 +335,7 @@ const syncAriaLabel = computed<string>(() => {
   return `${syncButtonText.value} for ${props.pr.key}`;
 });
 
+const descriptionHeadingId = `description-heading-${useId()}`;
 const checksHeadingId = `checks-heading-${useId()}`;
 
 const checkGroups = computed<CheckGroup[]>(() => {

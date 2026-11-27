@@ -37,6 +37,7 @@
         :pr="activePr"
         :inspector="activeInspector"
         :now-ms="nowMs"
+        :resolved-theme="resolvedTheme"
         :sync-state="syncState"
         :draft-state="draftState"
         :merge-state="mergeState"
@@ -49,6 +50,7 @@
         @load-labels="$emit('load-labels', $event)"
         @retry-load-labels="$emit('retry-load-labels', $event)"
         @update-labels="(target, labels) => $emit('update-labels', target, labels)"
+        @open-mermaid="$emit('open-mermaid', $event)"
       />
     </div>
   </aside>
@@ -72,6 +74,7 @@
       :pr="pr"
       :inspector="inspector"
       :now-ms="nowMs"
+      :resolved-theme="resolvedTheme"
       :sync-state="syncState"
       :draft-state="draftState"
       :merge-state="mergeState"
@@ -84,6 +87,7 @@
       @load-labels="$emit('load-labels', $event)"
       @retry-load-labels="$emit('retry-load-labels', $event)"
       @update-labels="(target, labels) => $emit('update-labels', target, labels)"
+      @open-mermaid="$emit('open-mermaid', $event)"
     />
   </section>
 </template>
@@ -105,6 +109,7 @@ import {
   type PrSyncState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
+import type { ResolvedTheme } from '@/composables/use-theme';
 import type { MergeMethod, PrView } from '@/types/pr';
 
 interface Props {
@@ -112,6 +117,7 @@ interface Props {
   pr: PrView | null;
   inspector: InspectorState;
   nowMs: number;
+  resolvedTheme?: ResolvedTheme;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
   mergeState?: PrMergeState;
@@ -120,6 +126,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  resolvedTheme: 'dark',
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
   mergeState: () => IDLE_PR_MERGE_STATE,
@@ -136,6 +143,7 @@ defineEmits<{
   'load-labels': [pr: PrView];
   'retry-load-labels': [pr: PrView];
   'update-labels': [pr: PrView, labels: string[]];
+  'open-mermaid': [source: string];
 }>();
 
 const lastOpenPr = ref<PrView | null>(props.pr);
