@@ -345,3 +345,22 @@ export interface UpdateReviewersResponse {
   requestedUsers: string[];
   requestedTeams: string[];
 }
+
+export interface SavedFilterPreset {
+  id: string;
+  name: string;
+  filters: {
+    view: 'all' | 'mine' | 'review' | 'team';
+    bucket: '' | Bucket | 'ci-failing';
+    q: string;
+    repos: 'all' | 'none' | string[];
+    drafts: boolean;
+    snoozed: boolean;
+    staleOnly: boolean;
+  };
+  createdAt: string;
+}
+
+export interface PresetsResponse {
+  presets: SavedFilterPreset[];
+}

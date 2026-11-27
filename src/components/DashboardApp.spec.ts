@@ -865,9 +865,13 @@ describe('DashboardApp', () => {
         repoSelection: { mode: 'subset', repos: ['acme/web-app', 'acme/core-api'] },
         drafts: false,
         snoozed: false,
+        staleOnly: false,
       }),
     ).toBe('?repos=acme%2Fcore-api%2Cacme%2Fweb-app');
-    expect(parseFiltersFromSearch('?snoozed=1').snoozed).toBe(true);
+    expect(parseFiltersFromSearch('?snoozed=1&stale=1')).toMatchObject({
+      snoozed: true,
+      staleOnly: true,
+    });
 
     const snap = makeSnapshot();
     vi.stubGlobal(
@@ -1559,7 +1563,14 @@ describe('DashboardApp', () => {
       });
 
       let snapshotCalls = 0;
-      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/presets') {
+          return new Response(JSON.stringify({ presets: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
         snapshotCalls++;
         return new Response(
           JSON.stringify(makeSnapshot({ fetchedAt: new Date(Date.now()).toISOString() })),
@@ -1616,6 +1627,12 @@ describe('DashboardApp', () => {
 
       const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
         const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/presets') {
+          return new Response(JSON.stringify({ presets: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
         requestedUrls.push(url);
         if (requestedUrls.length === 1) {
           // Warm-start cached response from 5m ago while server refreshes in background
@@ -2413,6 +2430,116 @@ describe('DashboardApp', () => {
     await flushPromises();
     expect(resolvePosts).toEqual([{ resolved: true }]);
     expect(card505.text()).not.toContain('1 unresolved');
+
+    wrapper.unmount();
+  });
+
+  it('supports Cmd+K command palette, multi-select bulk actions (excluding merge), and saved presets', async () => {
+    const savedPresetStore: Array<{
+      id: string;
+      name: string;
+      filters: Record<string, unknown>;
+      createdAt: string;
+    }> = [];
+    const pinKeys: string[] = [];
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+
+      if (url === '/api/presets' && method === 'GET') {
+        return new Response(JSON.stringify({ presets: savedPresetStore }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/presets' && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          name: string;
+          filters: Record<string, unknown>;
+        };
+        const preset = {
+          id: `preset-${savedPresetStore.length + 1}`,
+          name: body.name,
+          filters: body.filters,
+          createdAt: '2026-11-24T12:00:00.000Z',
+        };
+        savedPresetStore.push(preset);
+        return new Response(JSON.stringify({ preset, presets: [...savedPresetStore] }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/triage') && method === 'POST') {
+        const match = /^\/api\/pull\/([^/]+)\/([^/]+)\/(\d+)\/triage$/.exec(url);
+        const key = `${match![1]}/${match![2]}#${match![3]}`;
+        pinKeys.push(key);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            key,
+            triage: { pinned: true, pinnedAt: '2026-11-24T12:00:00.000Z', isSnoozed: false },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      return new Response(JSON.stringify(makeSnapshot()), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"palette-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Open Command Palette via Meta+K and apply built-in "Stale > 3d" preset
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }));
+    await flushPromises();
+    const palette = wrapper.find('.command-palette-dialog');
+    expect(palette.attributes('open')).toBeDefined();
+
+    await palette.find('.palette-input').setValue('Stale');
+    await flushPromises();
+    const staleOption = palette.findAll('.palette-option')[0]!;
+    expect(staleOption.text()).toContain('Stale > 3d');
+    await staleOption.trigger('click');
+    await flushPromises();
+
+    // Only #303 (idleDays: 5) matches Stale > 3d
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
+    expect(wrapper.find('.action-queue .pr-card').text()).toContain('acme/worker#303');
+
+    // Save current Stale > 3d view as a named preset
+    await wrapper.find('.preset-trigger').trigger('click');
+    await flushPromises();
+    await wrapper.find('.save-preset-input').setValue('My Stale Watch');
+    await wrapper.find('.save-preset-form').trigger('submit');
+    await flushPromises();
+    expect(savedPresetStore).toHaveLength(1);
+    expect(wrapper.find('.preset-picker-popover').text()).toContain('My Stale Watch');
+
+    // Clear filters -> select two PRs -> BulkActionBar appears with NO bulk merge button
+    await wrapper.find('.clear-btn').trigger('click');
+    await flushPromises();
+    const checkboxes = wrapper.findAll('.pr-select-checkbox');
+    await checkboxes[0]!.trigger('click');
+    await checkboxes[1]!.trigger('click');
+    await flushPromises();
+
+    const bulkBar = wrapper.find('.bulk-action-bar');
+    expect(bulkBar.exists()).toBe(true);
+    expect(bulkBar.text()).toContain('2 selected');
+    expect(bulkBar.text()).not.toContain('Merge');
+    expect(bulkBar.text()).not.toContain('Squash');
+
+    // Bulk Pin runs on both selected PRs and completes cleanly
+    const bulkPinBtn = bulkBar.findAll('.bulk-btn').find((b) => b.text().includes('Pin'))!;
+    await bulkPinBtn.trigger('click');
+    await flushPromises();
+    expect(pinKeys).toHaveLength(2);
+    expect(wrapper.find('.bulk-done-row').text()).toContain('2 succeeded');
 
     wrapper.unmount();
   });

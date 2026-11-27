@@ -17,6 +17,7 @@
       @refresh="fetchSnapshot(true)"
       @toggle-theme="toggleTheme"
       @update-poll-interval="setPollIntervalMs"
+      @open-palette="openPalette"
     />
 
     <WarningStrip
@@ -51,6 +52,10 @@
           :draft-count="draftPullRequests.length"
           :snoozed="snoozed"
           :snoozed-count="snoozedPullRequests.length"
+          :stale-only="staleOnly"
+          :saved-presets="savedPresets"
+          :presets-saving="presetsSaving"
+          :presets-error="presetsError"
           @update:view="view = $event"
           @update:bucket="bucket = $event"
           @update:q="q = $event"
@@ -58,6 +63,10 @@
           @toggle-all="onToggleAllRepos"
           @update:drafts="drafts = $event"
           @update:snoozed="snoozed = $event"
+          @update:stale-only="staleOnly = $event"
+          @apply-preset="onApplyPreset"
+          @save-preset="onSavePreset"
+          @delete-preset="onDeletePreset"
           @clear="resetFilters"
         />
       </div>
@@ -66,6 +75,7 @@
         <ActionQueue
           :pull-requests="primaryQueuePulls"
           :selected-key="activeKey"
+          :checked-keys="checkedKeys"
           :now-ms="nowMs"
           :is-loading="clientState === 'initializing' && !snapshot"
           :active-bucket="bucket"
@@ -83,6 +93,7 @@
           :rerun-states="rerunStates"
           :triage-states="triageStates"
           @select="onSelectPr"
+          @toggle-check="onToggleCheck"
           @sync="syncPullRequest"
           @rerun-checks="rerunPullChecks"
           @toggle-draft="togglePullDraft"
@@ -257,11 +268,28 @@
       </div>
     </main>
 
+    <BulkActionBar
+      :selected-pulls="selectedBulkPulls"
+      :visible-count="primaryQueuePulls.length"
+      :bulk-state="bulkState"
+      @select-all-visible="selectAllVisible"
+      @clear-selection="clearBulkSelection"
+      @bulk-sync="runBulkSync(selectedBulkPulls)"
+      @bulk-rerun="runBulkRerun(selectedBulkPulls)"
+      @bulk-pin="runBulkPin(selectedBulkPulls)"
+      @bulk-snooze="runBulkSnooze(selectedBulkPulls)"
+      @bulk-draft="runBulkDraft(selectedBulkPulls, $event)"
+      @cancel-bulk="cancelBulkAction"
+      @dismiss-bulk="dismissBulkAction"
+    />
+
     <footer class="app-footer">
       <div class="app-footer-inner">
         <div class="shortcut-bar" aria-label="Keyboard shortcuts">
+          <span><kbd>⌘K</kbd> commands</span>
           <span><kbd>j</kbd>/<kbd>k</kbd> navigate</span>
           <span><kbd>Enter</kbd> inspect</span>
+          <span><kbd>x</kbd> select</span>
           <span><kbd>o</kbd> open on GitHub</span>
           <span><kbd>p</kbd> pin</span>
           <span><kbd>z</kbd> snooze</span>
@@ -334,6 +362,8 @@
       @close="closeMermaidFullscreen"
     />
 
+    <CommandPaletteDialog :open="paletteOpen" :commands="paletteCommands" @close="closePalette" />
+
     <div class="visually-hidden" aria-live="polite" aria-atomic="true">
       {{ announcement }}
     </div>
@@ -341,9 +371,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import ActionQueue from '@/components/ActionQueue.vue';
 import AppHeader from '@/components/AppHeader.vue';
+import BulkActionBar from '@/components/BulkActionBar.vue';
+import CommandPaletteDialog from '@/components/CommandPaletteDialog.vue';
 import FilterBar from '@/components/FilterBar.vue';
 import KpiStrip from '@/components/KpiStrip.vue';
 import MergeConfirmDialog from '@/components/MergeConfirmDialog.vue';
@@ -360,7 +392,14 @@ import {
   toggleRepoInSelection,
   useUrlState,
 } from '@/composables/use-url-state';
-import type { MergeMethod, PrView, SnoozeCondition } from '@/types/pr';
+import type { MergeMethod, PrView, SavedFilterPreset, SnoozeCondition } from '@/types/pr';
+import { IDLE_BULK_ACTION_STATE, runBulkAction, type BulkActionState } from '@/utils/bulk-runner';
+import type { PaletteCommand } from '@/utils/command-palette';
+import {
+  BUILT_IN_PRESETS,
+  dashboardFiltersToPresetFilters,
+  presetFiltersToDashboardFilters,
+} from '@/utils/presets';
 import { isPrReadyToMerge } from '@/utils/ready-to-merge';
 import { isPrPinned, isPrSnoozed } from '@/utils/triage';
 
@@ -396,6 +435,9 @@ const {
   threadActionStates,
   repoReviewersStates,
   prReviewersStates,
+  savedPresets,
+  presetsSaving,
+  presetsError,
   fetchSnapshot,
   syncPullRequest,
   rerunPullChecks,
@@ -406,6 +448,8 @@ const {
   togglePullThreadResolved,
   loadRepoReviewers,
   updatePullReviewers,
+  saveFilterPreset,
+  deleteFilterPreset,
   togglePullDraft,
   mergePullRequest,
   loadRepoLabels,
@@ -471,7 +515,43 @@ async function onConfirmMerge(pr: PrView, mergeMethod: MergeMethod): Promise<voi
 }
 
 const { resolvedTheme, toggleTheme } = useTheme();
-const { view, bucket, q, repoSelection, drafts, snoozed, resetFilters } = useUrlState();
+const { view, bucket, q, repoSelection, drafts, snoozed, staleOnly, applyFilters, resetFilters } =
+  useUrlState();
+
+const paletteOpen = ref<boolean>(false);
+const checkedKeys = ref<Set<string>>(new Set());
+const lastCheckedKey = ref<string | null>(null);
+const bulkState = ref<BulkActionState>(IDLE_BULK_ACTION_STATE);
+let bulkCancelled = false;
+
+function openPalette(): void {
+  paletteOpen.value = true;
+}
+
+function closePalette(): void {
+  paletteOpen.value = false;
+}
+
+function onApplyPreset(filters: SavedFilterPreset['filters']): void {
+  applyFilters(presetFiltersToDashboardFilters(filters));
+}
+
+function onSavePreset(name: string): void {
+  const filters = dashboardFiltersToPresetFilters({
+    view: view.value,
+    bucket: bucket.value,
+    q: q.value,
+    repoSelection: repoSelection.value,
+    drafts: drafts.value,
+    snoozed: snoozed.value,
+    staleOnly: staleOnly.value,
+  });
+  void saveFilterPreset(name, filters);
+}
+
+function onDeletePreset(id: string): void {
+  void deleteFilterPreset(id);
+}
 
 const filterBarRef = ref<InstanceType<typeof FilterBar> | null>(null);
 const cursorKey = ref<string | null>(null);
@@ -553,19 +633,214 @@ const primaryQueuePulls = computed<PrView[]>(() => {
   const baseForBucket = snoozed.value
     ? filteredBasePulls.value
     : filteredBasePulls.value.filter((pr) => !isPrSnoozed(pr));
+  let result: PrView[];
   if (bucket.value === 'ci-failing') {
-    return visibleScopedPulls.value.filter((pr) => pr.ci.state === 'failing');
-  }
-  if (bucket.value === 'waiting') {
-    return baseForBucket.filter(
+    result = visibleScopedPulls.value.filter((pr) => pr.ci.state === 'failing');
+  } else if (bucket.value === 'waiting') {
+    result = baseForBucket.filter(
       (pr) => pr.bucket === 'waiting' && (view.value === 'team' || pr.sources.includes('authored')),
     );
+  } else if (bucket.value) {
+    result = baseForBucket.filter((pr) => pr.bucket === bucket.value);
+  } else {
+    result = visibleScopedPulls.value;
   }
-  if (bucket.value) {
-    return baseForBucket.filter((pr) => pr.bucket === bucket.value);
-  }
-  return visibleScopedPulls.value;
+  return staleOnly.value ? result.filter((pr) => pr.idleDays > 3) : result;
 });
+
+watch(allPullRequests, (nextPulls) => {
+  if (checkedKeys.value.size === 0) {
+    return;
+  }
+  const openSet = new Set(nextPulls.map((pr) => pr.key));
+  const kept = new Set<string>();
+  for (const key of checkedKeys.value) {
+    if (openSet.has(key)) {
+      kept.add(key);
+    }
+  }
+  if (kept.size !== checkedKeys.value.size) {
+    checkedKeys.value = kept;
+  }
+});
+
+const selectedBulkPulls = computed<PrView[]>(() =>
+  allPullRequests.value.filter((pr) => checkedKeys.value.has(pr.key)),
+);
+
+function onToggleCheck(pr: PrView, shiftKey: boolean): void {
+  if (bulkState.value.status === 'done') {
+    bulkState.value = IDLE_BULK_ACTION_STATE;
+  }
+  const next = new Set(checkedKeys.value);
+  if (shiftKey && lastCheckedKey.value) {
+    const list = primaryQueuePulls.value;
+    const fromIdx = list.findIndex((p) => p.key === lastCheckedKey.value);
+    const toIdx = list.findIndex((p) => p.key === pr.key);
+    if (fromIdx >= 0 && toIdx >= 0) {
+      const [start, end] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+      for (let i = start; i <= end; i++) {
+        next.add(list[i]!.key);
+      }
+      checkedKeys.value = next;
+      lastCheckedKey.value = pr.key;
+      return;
+    }
+  }
+  if (next.has(pr.key)) {
+    next.delete(pr.key);
+  } else {
+    next.add(pr.key);
+  }
+  checkedKeys.value = next;
+  lastCheckedKey.value = pr.key;
+}
+
+function selectAllVisible(): void {
+  if (bulkState.value.status === 'done') {
+    bulkState.value = IDLE_BULK_ACTION_STATE;
+  }
+  checkedKeys.value = new Set(primaryQueuePulls.value.map((pr) => pr.key));
+}
+
+function clearBulkSelection(): void {
+  checkedKeys.value = new Set();
+  lastCheckedKey.value = null;
+}
+
+function cancelBulkAction(): void {
+  bulkCancelled = true;
+}
+
+function dismissBulkAction(): void {
+  bulkState.value = IDLE_BULK_ACTION_STATE;
+}
+
+async function runBulkSync(targets: PrView[]): Promise<void> {
+  const eligible = targets.filter((pr) => pr.merge.state === 'behind');
+  if (eligible.length === 0 || bulkState.value.status === 'running') {
+    return;
+  }
+  bulkCancelled = false;
+  await runBulkAction({
+    actionLabel: 'Syncing branches',
+    items: eligible,
+    concurrency: 2,
+    isCancelled: () => bulkCancelled,
+    onUpdate: (st) => {
+      bulkState.value = st;
+    },
+    execute: async (pr) => {
+      await syncPullRequest(pr);
+      const st = syncStates.value[pr.key];
+      if (st?.status === 'error') {
+        return { ok: false, error: st.error, fatal: /rate limit|401|unauthorized/i.test(st.error) };
+      }
+      return { ok: true };
+    },
+  });
+  clearBulkSelection();
+}
+
+async function runBulkRerun(targets: PrView[]): Promise<void> {
+  const eligible = targets.filter((pr) => pr.ci.state === 'failing');
+  if (eligible.length === 0 || bulkState.value.status === 'running') {
+    return;
+  }
+  bulkCancelled = false;
+  await runBulkAction({
+    actionLabel: 'Re-running failed CI',
+    items: eligible,
+    concurrency: 2,
+    isCancelled: () => bulkCancelled,
+    onUpdate: (st) => {
+      bulkState.value = st;
+    },
+    execute: async (pr) => {
+      const ok = await rerunPullChecks(pr);
+      const st = rerunStates.value[pr.key];
+      if (!ok) {
+        const err = st?.status === 'error' ? st.error : 'Failed to re-run CI';
+        return { ok: false, error: err, fatal: /rate limit|401|unauthorized/i.test(err) };
+      }
+      return { ok: true };
+    },
+  });
+  clearBulkSelection();
+}
+
+async function runBulkPin(targets: PrView[]): Promise<void> {
+  if (targets.length === 0 || bulkState.value.status === 'running') {
+    return;
+  }
+  bulkCancelled = false;
+  await runBulkAction({
+    actionLabel: 'Pinning PRs',
+    items: targets,
+    concurrency: 2,
+    isCancelled: () => bulkCancelled,
+    onUpdate: (st) => {
+      bulkState.value = st;
+    },
+    execute: async (pr) => {
+      const ok = await updatePullTriage(pr, 'pin');
+      const st = triageStates.value[pr.key];
+      return ok ? { ok: true } : { ok: false, error: st?.status === 'error' ? st.error : 'Failed' };
+    },
+  });
+  clearBulkSelection();
+}
+
+async function runBulkSnooze(targets: PrView[]): Promise<void> {
+  if (targets.length === 0 || bulkState.value.status === 'running') {
+    return;
+  }
+  bulkCancelled = false;
+  await runBulkAction({
+    actionLabel: 'Snoozing PRs',
+    items: targets,
+    concurrency: 2,
+    isCancelled: () => bulkCancelled,
+    onUpdate: (st) => {
+      bulkState.value = st;
+    },
+    execute: async (pr) => {
+      const condition: SnoozeCondition = pr.headRefOid
+        ? { kind: 'until-push', headRefOid: pr.headRefOid }
+        : { kind: 'until-time', untilIso: new Date(Date.now() + 2 * 60 * 60_000).toISOString() };
+      const ok = await updatePullTriage(pr, 'snooze', condition);
+      const st = triageStates.value[pr.key];
+      return ok ? { ok: true } : { ok: false, error: st?.status === 'error' ? st.error : 'Failed' };
+    },
+  });
+  clearBulkSelection();
+}
+
+async function runBulkDraft(targets: PrView[], targetDraft: boolean): Promise<void> {
+  const eligible = targets.filter((pr) => pr.isDraft !== targetDraft);
+  if (eligible.length === 0 || bulkState.value.status === 'running') {
+    return;
+  }
+  bulkCancelled = false;
+  await runBulkAction({
+    actionLabel: targetDraft ? 'Marking as draft' : 'Marking ready for review',
+    items: eligible,
+    concurrency: 2,
+    isCancelled: () => bulkCancelled,
+    onUpdate: (st) => {
+      bulkState.value = st;
+    },
+    execute: async (pr) => {
+      await togglePullDraft(pr, targetDraft);
+      const st = draftStates.value[pr.key];
+      if (st?.status === 'error') {
+        return { ok: false, error: st.error, fatal: /rate limit|401|unauthorized/i.test(st.error) };
+      }
+      return { ok: true };
+    },
+  });
+  clearBulkSelection();
+}
 
 const readyPullRequests = computed<PrView[]>(() =>
   filteredBasePulls.value.filter(
@@ -595,8 +870,222 @@ const hasActiveFilters = computed<boolean>(() => {
     q.value.trim() !== '' ||
     repoSelection.value.mode !== 'all' ||
     drafts.value ||
-    snoozed.value
+    snoozed.value ||
+    staleOnly.value
   );
+});
+
+const focusedOrSelectedPr = computed<PrView | null>(() => {
+  if (!activeKey.value) {
+    return null;
+  }
+  return allPullRequests.value.find((p) => p.key === activeKey.value) ?? null;
+});
+
+const paletteCommands = computed<PaletteCommand[]>(() => {
+  const commands: PaletteCommand[] = [];
+  const activePr = focusedOrSelectedPr.value;
+
+  if (activePr) {
+    commands.push({
+      id: `active:inspect:${activePr.key}`,
+      category: 'Active PR',
+      title: `Inspect ${activePr.key}`,
+      subtitle: activePr.title,
+      shortcut: 'Enter',
+      run: () => onSelectPr(activePr),
+    });
+    if (activePr.merge.state === 'behind') {
+      commands.push({
+        id: `active:sync:${activePr.key}`,
+        category: 'Active PR',
+        title: `Sync ${activePr.key} with ${activePr.baseRefName}`,
+        subtitle: activePr.title,
+        run: () => {
+          void syncPullRequest(activePr);
+        },
+      });
+    }
+    if (activePr.ci.state === 'failing') {
+      commands.push({
+        id: `active:rerun:${activePr.key}`,
+        category: 'Active PR',
+        title: `Re-run failed CI on ${activePr.key}`,
+        subtitle: activePr.title,
+        run: () => {
+          void rerunPullChecks(activePr);
+        },
+      });
+    }
+    if (!activePr.isDraft) {
+      commands.push({
+        id: `active:merge:${activePr.key}`,
+        category: 'Active PR',
+        title: `Squash and merge ${activePr.key}`,
+        subtitle: 'Opens confirmation dialog',
+        run: () => openMergeConfirm(activePr, 'squash'),
+      });
+    }
+    commands.push({
+      id: `active:draft:${activePr.key}`,
+      category: 'Active PR',
+      title: activePr.isDraft
+        ? `Mark ${activePr.key} ready for review`
+        : `Convert ${activePr.key} to draft`,
+      run: () => {
+        void togglePullDraft(activePr, !activePr.isDraft);
+      },
+    });
+    commands.push({
+      id: `active:pin:${activePr.key}`,
+      category: 'Active PR',
+      title: isPrPinned(activePr) ? `Unpin ${activePr.key}` : `Pin ${activePr.key} to top`,
+      shortcut: 'p',
+      run: () => onTogglePin(activePr),
+    });
+    commands.push({
+      id: `active:snooze:${activePr.key}`,
+      category: 'Active PR',
+      title: isPrSnoozed(activePr)
+        ? `Unsnooze ${activePr.key}`
+        : `Snooze ${activePr.key} until next push`,
+      shortcut: 'z',
+      run: () => {
+        if (isPrSnoozed(activePr)) {
+          onUnsnoozePr(activePr);
+        } else {
+          const cond: SnoozeCondition = activePr.headRefOid
+            ? { kind: 'until-push', headRefOid: activePr.headRefOid }
+            : {
+                kind: 'until-time',
+                untilIso: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+              };
+          onSnoozePr(activePr, cond);
+        }
+      },
+    });
+    commands.push({
+      id: `active:open:${activePr.key}`,
+      category: 'Active PR',
+      title: `Open ${activePr.key} on GitHub`,
+      shortcut: 'o',
+      run: () => {
+        window.open(activePr.url, '_blank', 'noopener,noreferrer');
+      },
+    });
+  }
+
+  for (const preset of BUILT_IN_PRESETS) {
+    commands.push({
+      id: `preset:${preset.id}`,
+      category: 'Presets',
+      title: preset.name,
+      subtitle: preset.description,
+      run: () => onApplyPreset(preset.filters),
+    });
+  }
+  for (const preset of savedPresets.value) {
+    commands.push({
+      id: `preset:saved:${preset.id}`,
+      category: 'Presets',
+      title: preset.name,
+      subtitle: 'Saved view',
+      run: () => onApplyPreset(preset.filters),
+    });
+  }
+
+  const visibleBehind = primaryQueuePulls.value.filter((pr) => pr.merge.state === 'behind');
+  const visibleFailing = primaryQueuePulls.value.filter((pr) => pr.ci.state === 'failing');
+  if (primaryQueuePulls.value.length > 0) {
+    commands.push({
+      id: 'bulk:select-all',
+      category: 'Bulk Actions',
+      title: `Select all visible PRs (${primaryQueuePulls.value.length})`,
+      run: selectAllVisible,
+    });
+  }
+  if (visibleBehind.length > 0) {
+    commands.push({
+      id: 'bulk:sync-visible',
+      category: 'Bulk Actions',
+      title: `Sync all behind PRs in view (${visibleBehind.length})`,
+      run: () => {
+        void runBulkSync(visibleBehind);
+      },
+    });
+  }
+  if (visibleFailing.length > 0) {
+    commands.push({
+      id: 'bulk:rerun-visible',
+      category: 'Bulk Actions',
+      title: `Re-run all failing CI in view (${visibleFailing.length})`,
+      run: () => {
+        void runBulkRerun(visibleFailing);
+      },
+    });
+  }
+  if (checkedKeys.value.size > 0) {
+    commands.push({
+      id: 'bulk:clear-selection',
+      category: 'Bulk Actions',
+      title: `Clear selection (${checkedKeys.value.size})`,
+      run: clearBulkSelection,
+    });
+  }
+
+  commands.push(
+    {
+      id: 'app:refresh',
+      category: 'App',
+      title: 'Force refresh from GitHub',
+      shortcut: 'r',
+      run: () => {
+        void fetchSnapshot(true);
+      },
+    },
+    {
+      id: 'app:theme',
+      category: 'App',
+      title: resolvedTheme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
+      run: toggleTheme,
+    },
+    {
+      id: 'app:drafts',
+      category: 'App',
+      title: drafts.value ? 'Hide draft PRs' : 'Include draft PRs',
+      run: () => {
+        drafts.value = !drafts.value;
+      },
+    },
+    {
+      id: 'app:snoozed',
+      category: 'App',
+      title: snoozed.value ? 'Hide snoozed PRs' : 'Show snoozed PRs',
+      run: () => {
+        snoozed.value = !snoozed.value;
+      },
+    },
+    {
+      id: 'app:reset-filters',
+      category: 'App',
+      title: 'Reset all filters',
+      shortcut: 'Esc',
+      run: resetFilters,
+    },
+  );
+
+  for (const pr of allPullRequests.value) {
+    commands.push({
+      id: `pr:${pr.key}`,
+      category: 'Pull Requests',
+      title: `${pr.key} · ${pr.title}`,
+      subtitle: `@${pr.author} · ${pr.blockerSummary}`,
+      keywords: `${pr.headRefName} ${pr.labels.map((l) => l.name).join(' ')}`,
+      run: () => onSelectPr(pr),
+    });
+  }
+
+  return commands;
 });
 
 const activeKey = computed<string | null>(() => inspector.value.key ?? cursorKey.value);
@@ -643,7 +1132,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .snooze-picker-popover, .reviewer-picker-popover, .refresh-btn';
+  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .command-palette-dialog, .merge-menu-popover, .label-picker-popover, .snooze-picker-popover, .reviewer-picker-popover, .preset-picker-popover, .bulk-action-bar, .refresh-btn';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {
@@ -673,8 +1162,32 @@ function onGlobalClick(event: MouseEvent): void {
   }
 }
 
+function hasOpenPopover(): boolean {
+  try {
+    if (document.querySelector('[popover]:popover-open')) {
+      return true;
+    }
+  } catch {
+    // Selector unsupported in older/test DOM engines
+  }
+  return Boolean(document.querySelector('[popover].fallback-open'));
+}
+
 function onGlobalKeydown(event: KeyboardEvent): void {
   if (
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    event.key.toLowerCase() === 'k' &&
+    mergeConfirm.value.status !== 'open' &&
+    mermaidFullscreen.value.status !== 'open'
+  ) {
+    event.preventDefault();
+    paletteOpen.value = !paletteOpen.value;
+    return;
+  }
+
+  if (
+    paletteOpen.value ||
     event.metaKey ||
     event.ctrlKey ||
     event.altKey ||
@@ -685,8 +1198,15 @@ function onGlobalKeydown(event: KeyboardEvent): void {
   }
 
   if (event.key === 'Escape') {
+    if (hasOpenPopover()) {
+      return;
+    }
     if (inspector.value.status !== 'closed') {
       closeInspector();
+      return;
+    }
+    if (checkedKeys.value.size > 0) {
+      clearBulkSelection();
       return;
     }
     if (event.target instanceof HTMLInputElement && event.target.id === 'pr-search') {
@@ -756,7 +1276,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
     return;
   }
 
-  if (event.key === 'p' || event.key === 'z') {
+  if (event.key === 'p' || event.key === 'z' || event.key === 'x') {
     const key =
       (document.activeElement instanceof HTMLElement
         ? document.activeElement.dataset.prKey
@@ -766,6 +1286,10 @@ function onGlobalKeydown(event: KeyboardEvent): void {
       return;
     }
     event.preventDefault();
+    if (event.key === 'x') {
+      onToggleCheck(targetPr, event.shiftKey);
+      return;
+    }
     if (event.key === 'p') {
       onTogglePin(targetPr);
       return;

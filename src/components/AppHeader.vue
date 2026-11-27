@@ -81,6 +81,19 @@
 
       <button
         type="button"
+        class="header-btn palette-trigger-btn"
+        aria-label="Open command palette"
+        aria-keyshortcuts="Meta+K Control+K"
+        title="Command palette (⌘K / Ctrl+K)"
+        @click="$emit('openPalette')"
+      >
+        <CarbonIcon name="terminal" :size="14" />
+        <span class="btn-label">Commands</span>
+        <kbd class="header-kbd">⌘K</kbd>
+      </button>
+
+      <button
+        type="button"
         class="header-btn"
         :aria-label="themeButtonLabel"
         @click="$emit('toggleTheme')"
@@ -146,6 +159,7 @@ const emit = defineEmits<{
   refresh: [];
   toggleTheme: [];
   updatePollInterval: [ms: number];
+  openPalette: [];
 }>();
 
 const statusTone = computed<'ok' | 'warn' | 'err'>(() => {
@@ -430,6 +444,16 @@ function onRefreshClick(): void {
 .header-btn[aria-disabled='true'] {
   opacity: 0.6;
   cursor: wait;
+}
+
+.header-kbd {
+  padding: 0.04rem 0.3rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
 }
 
 .rate-gauges.is-low .rate-chip {

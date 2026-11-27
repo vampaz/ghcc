@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import type { SnapshotResponse, SnoozeCondition } from '@/types/pr';
+import type { SavedFilterPreset, SnapshotResponse, SnoozeCondition } from '@/types/pr';
 
 export interface CachedMergeabilityEntry {
   headRefOid: string;
@@ -42,6 +42,7 @@ export interface PersistedState {
   probeCounters: Record<string, ProbeCounterEntry>;
   draftComparisons?: Record<string, CachedDraftComparisonEntry>;
   triage?: Record<string, PrTriageEntry>;
+  presets?: SavedFilterPreset[];
   lastSnapshot?: CachedSnapshotEntry;
 }
 
@@ -51,6 +52,7 @@ const EMPTY_STATE: PersistedState = {
   probeCounters: {},
   draftComparisons: {},
   triage: {},
+  presets: [],
 };
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.cache/state.json');
@@ -79,6 +81,7 @@ export class StateStore {
           probeCounters: { ...parsed.probeCounters },
           draftComparisons: parsed.draftComparisons ? { ...parsed.draftComparisons } : {},
           triage: parsed.triage ? { ...parsed.triage } : {},
+          presets: Array.isArray(parsed.presets) ? [...parsed.presets] : [],
           ...(parsed.lastSnapshot?.snapshot && typeof parsed.lastSnapshot.savedAt === 'string'
             ? { lastSnapshot: parsed.lastSnapshot }
             : {}),
@@ -95,6 +98,7 @@ export class StateStore {
       probeCounters: {},
       draftComparisons: {},
       triage: {},
+      presets: [],
     };
     return this.state;
   }
@@ -183,6 +187,29 @@ export class StateStore {
     await this.persist();
   }
 
+  async getPresets(): Promise<SavedFilterPreset[]> {
+    const state = await this.load();
+    return [...(state.presets ?? [])];
+  }
+
+  async savePreset(preset: SavedFilterPreset): Promise<SavedFilterPreset[]> {
+    const state = await this.load();
+    const existing = state.presets ?? [];
+    const filtered = existing.filter((item) => item.id !== preset.id);
+    const next = [...filtered, preset].slice(-25);
+    state.presets = next;
+    await this.persist();
+    return [...next];
+  }
+
+  async deletePreset(id: string): Promise<SavedFilterPreset[]> {
+    const state = await this.load();
+    const next = (state.presets ?? []).filter((item) => item.id !== id);
+    state.presets = next;
+    await this.persist();
+    return [...next];
+  }
+
   async getLastSnapshot(): Promise<CachedSnapshotEntry | null> {
     const state = await this.load();
     return state.lastSnapshot ?? null;
@@ -201,6 +228,7 @@ export class StateStore {
       probeCounters: {},
       draftComparisons: {},
       triage: {},
+      presets: [],
     };
     await this.persist();
   }

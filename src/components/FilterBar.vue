@@ -70,6 +70,15 @@
       @toggle-all="onToggleAll"
     />
 
+    <PresetPicker
+      :saved-presets="savedPresets"
+      :saving="presetsSaving"
+      :error="presetsError"
+      @apply-preset="$emit('apply-preset', $event)"
+      @save-preset="$emit('save-preset', $event)"
+      @delete-preset="$emit('delete-preset', $event)"
+    />
+
     <button
       v-if="bucket"
       type="button"
@@ -78,6 +87,17 @@
       @click="$emit('update:bucket', '')"
     >
       <span>{{ bucketLabel }}</span>
+      <CarbonIcon name="close" :size="14" />
+    </button>
+
+    <button
+      v-if="staleOnly"
+      type="button"
+      class="filter-chip"
+      aria-label="Clear Stale > 3d filter"
+      @click="$emit('update:staleOnly', false)"
+    >
+      <span>Stale &gt; 3d</span>
       <CarbonIcon name="close" :size="14" />
     </button>
 
@@ -90,9 +110,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
+import PresetPicker from '@/components/PresetPicker.vue';
 import RepoPicker from '@/components/RepoPicker.vue';
 import type { BucketFilter, RepoSelection, ViewFilter } from '@/composables/use-url-state';
-import type { PrView } from '@/types/pr';
+import type { PrView, SavedFilterPreset } from '@/types/pr';
 
 interface Props {
   view: ViewFilter;
@@ -104,11 +125,19 @@ interface Props {
   draftCount: number;
   snoozed?: boolean;
   snoozedCount?: number;
+  staleOnly?: boolean;
+  savedPresets?: SavedFilterPreset[];
+  presetsSaving?: boolean;
+  presetsError?: string | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   snoozed: false,
   snoozedCount: 0,
+  staleOnly: false,
+  savedPresets: () => [],
+  presetsSaving: false,
+  presetsError: null,
 });
 
 const emit = defineEmits<{
@@ -119,6 +148,10 @@ const emit = defineEmits<{
   toggleAll: [allRepos: string[]];
   'update:drafts': [value: boolean];
   'update:snoozed': [value: boolean];
+  'update:staleOnly': [value: boolean];
+  'apply-preset': [filters: SavedFilterPreset['filters']];
+  'save-preset': [name: string];
+  'delete-preset': [id: string];
   clear: [];
 }>();
 
@@ -156,7 +189,8 @@ const hasActiveFilters = computed<boolean>(() => {
     props.q.trim() !== '' ||
     props.repoSelection.mode !== 'all' ||
     props.drafts ||
-    props.snoozed
+    props.snoozed ||
+    props.staleOnly
   );
 });
 

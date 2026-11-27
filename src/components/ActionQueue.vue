@@ -53,6 +53,8 @@
           :key="pr.key"
           :pr="pr"
           :is-selected="selectedKey === pr.key"
+          :is-checked="checkedKeys.has(pr.key)"
+          :selection-mode="checkedKeys.size > 0"
           :now-ms="nowMs"
           :sync-state="syncStates[pr.key]"
           :draft-state="draftStates[pr.key]"
@@ -62,6 +64,7 @@
           :rerun-state="rerunStates[pr.key]"
           :triage-state="triageStates[pr.key]"
           @select="$emit('select', $event)"
+          @toggle-check="(target, shiftKey) => $emit('toggle-check', target, shiftKey)"
           @sync="$emit('sync', $event)"
           @rerun-checks="$emit('rerun-checks', $event)"
           @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
@@ -101,6 +104,7 @@ import type { MergeMethod, PrView, SnoozeCondition } from '@/types/pr';
 interface Props {
   pullRequests: PrView[];
   selectedKey: string | null;
+  checkedKeys?: ReadonlySet<string>;
   nowMs: number;
   isLoading: boolean;
   activeBucket: BucketFilter;
@@ -120,6 +124,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  checkedKeys: () => new Set<string>(),
   hasSearchQuery: false,
   showSnoozed: false,
   snoozedCount: 0,
@@ -136,6 +141,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 defineEmits<{
   select: [pr: PrView];
+  'toggle-check': [pr: PrView, shiftKey: boolean];
   sync: [pr: PrView];
   'rerun-checks': [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];

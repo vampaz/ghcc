@@ -6,11 +6,13 @@ import type {
   PrDetailResponse,
   PrLabel,
   PrView,
+  PresetsResponse,
   RepoLabelsResponse,
   RepoReviewerOption,
   RepoReviewersResponse,
   RerunFailedChecksResponse,
   ReviewEvent,
+  SavedFilterPreset,
   SnapshotResponse,
   SnoozeCondition,
   SubmitReviewResponse,
@@ -420,6 +422,9 @@ export function useDashboardState(
   const threadActionStates = ref<Record<string, ThreadActionState>>({});
   const repoReviewersStates = ref<Record<string, RepoReviewersState>>({});
   const prReviewersStates = ref<Record<string, PrReviewersState>>({});
+  const savedPresets = ref<SavedFilterPreset[]>([]);
+  const presetsSaving = ref<boolean>(false);
+  const presetsError = ref<string | null>(null);
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -1524,6 +1529,86 @@ export function useDashboardState(
     }
   }
 
+  async function loadPresets(): Promise<void> {
+    try {
+      const response = await fetchFn('/api/presets', {
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as PresetsResponse;
+      if (Array.isArray(data?.presets)) {
+        savedPresets.value = data.presets;
+      }
+    } catch {
+      // Presets are optional local convenience state; ignore transient load failure.
+    }
+  }
+
+  async function saveFilterPreset(
+    name: string,
+    filters: SavedFilterPreset['filters'],
+  ): Promise<boolean> {
+    if (presetsSaving.value) {
+      return false;
+    }
+    presetsSaving.value = true;
+    presetsError.value = null;
+    try {
+      const response = await fetchFn('/api/presets', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name, filters }),
+      });
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to save preset (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as { presets: SavedFilterPreset[] };
+      if (Array.isArray(data?.presets)) {
+        savedPresets.value = data.presets;
+      }
+      announcement.value = `Saved filter preset "${name}".`;
+      return true;
+    } catch (error) {
+      presetsError.value = error instanceof Error ? error.message : 'Failed to save preset';
+      return false;
+    } finally {
+      presetsSaving.value = false;
+    }
+  }
+
+  async function deleteFilterPreset(id: string): Promise<boolean> {
+    presetsError.value = null;
+    try {
+      const response = await fetchFn('/api/presets', {
+        method: 'DELETE',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ id }),
+      });
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to delete preset (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as { presets: SavedFilterPreset[] };
+      if (Array.isArray(data?.presets)) {
+        savedPresets.value = data.presets;
+      }
+      announcement.value = 'Deleted filter preset.';
+      return true;
+    } catch (error) {
+      presetsError.value = error instanceof Error ? error.message : 'Failed to delete preset';
+      return false;
+    }
+  }
+
   async function togglePullDraft(pr: PrView, nextDraft?: boolean): Promise<void> {
     const targetDraft = nextDraft ?? !pr.isDraft;
     const current = getDraftState(pr.key);
@@ -1831,6 +1916,7 @@ export function useDashboardState(
 
   onMounted(() => {
     void fetchSnapshot(false);
+    void loadPresets();
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', onVisibilityChange);
     }
@@ -1883,6 +1969,9 @@ export function useDashboardState(
     threadActionStates,
     repoReviewersStates,
     prReviewersStates,
+    savedPresets,
+    presetsSaving,
+    presetsError,
     fetchSnapshot,
     syncPullRequest,
     rerunPullChecks,
@@ -1893,6 +1982,8 @@ export function useDashboardState(
     togglePullThreadResolved,
     loadRepoReviewers,
     updatePullReviewers,
+    saveFilterPreset,
+    deleteFilterPreset,
     togglePullDraft,
     mergePullRequest,
     loadRepoLabels,

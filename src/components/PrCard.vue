@@ -3,6 +3,8 @@
     class="pr-card"
     :class="{
       selected: isSelected,
+      checked: isChecked,
+      'selection-mode': selectionMode,
       pinned: isPinned,
       snoozed: isSnoozed,
       'stale-warm': pr.idleDays > 3 && pr.idleDays <= 7,
@@ -11,6 +13,16 @@
     :data-accent="edgeTone"
   >
     <div class="pr-card-body">
+      <label class="pr-select-wrap" @click.stop>
+        <input
+          type="checkbox"
+          class="pr-select-checkbox"
+          :checked="isChecked"
+          :aria-label="`Select ${pr.key} for bulk action`"
+          @click="onCheckClick"
+        />
+      </label>
+
       <button
         type="button"
         class="pr-card-trigger"
@@ -272,6 +284,8 @@ import { formatSnoozeBadge, isPrPinned, isPrSnoozed } from '@/utils/triage';
 interface Props {
   pr: PrView;
   isSelected: boolean;
+  isChecked?: boolean;
+  selectionMode?: boolean;
   nowMs: number;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
@@ -283,6 +297,8 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  isChecked: false,
+  selectionMode: false,
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
   mergeState: () => IDLE_PR_MERGE_STATE,
@@ -294,6 +310,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   select: [pr: PrView];
+  'toggle-check': [pr: PrView, shiftKey: boolean];
   sync: [pr: PrView];
   'rerun-checks': [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
@@ -305,6 +322,10 @@ const emit = defineEmits<{
   snooze: [pr: PrView, condition: SnoozeCondition];
   unsnooze: [pr: PrView];
 }>();
+
+function onCheckClick(event: MouseEvent): void {
+  emit('toggle-check', props.pr, event.shiftKey);
+}
 
 const isPinned = computed<boolean>(() => isPrPinned(props.pr));
 const isSnoozed = computed<boolean>(() => isPrSnoozed(props.pr));
@@ -494,6 +515,38 @@ const diffWidths = computed(() => {
 .pr-card.selected {
   border-color: var(--accent-blue);
   box-shadow: 0 0 0 1px var(--accent-blue);
+}
+
+.pr-card.checked {
+  background-color: color-mix(in srgb, var(--accent-blue-bg) 42%, var(--bg-surface));
+  border-color: color-mix(in srgb, var(--accent-blue) 55%, var(--border-subtle));
+}
+
+.pr-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  align-self: flex-start;
+  padding: 0.7rem 0 0 0.875rem;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.pr-select-checkbox {
+  inline-size: 0.95rem;
+  block-size: 0.95rem;
+  margin: 0;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+  opacity: 0.32;
+  transition: opacity 120ms ease;
+}
+
+.pr-card:hover .pr-select-checkbox,
+.pr-card:focus-within .pr-select-checkbox,
+.pr-card.selection-mode .pr-select-checkbox,
+.pr-card.checked .pr-select-checkbox {
+  opacity: 1;
 }
 
 .pr-card.pinned {
@@ -722,6 +775,10 @@ const diffWidths = computed(() => {
     flex-direction: row;
     align-items: flex-start;
     gap: 0.375rem;
+  }
+
+  .pr-select-wrap {
+    padding: 0.78rem 0 0 0.65rem;
   }
 
   .pr-card-trigger {

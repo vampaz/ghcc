@@ -5,7 +5,7 @@ A local and self-hosted web dashboard for pull requests you authored, pull reque
 ## Features
 
 - **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); prioritized **Action Queue** (including your authored waiting PRs) with local **Pin** and conditional **Snooze** (until next push, CI change, new activity, or timer) persisted in `.cache/state.json`, an **Inbox Zero** clear state, a side rail with **Ready to Merge** and **Waiting on Others** quick-jump panels, and a `stale` badge after more than 3 idle days.
-- **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, labels, and blocker summary; multi-repository checkboxes with a tri-state **Select all** toggle in the filter bar's **All repos** dropdown; URL-synced filter state.
+- **Filtering, presets & command palette**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` and `Show snoozed` checkboxes; instant search (`/`) across repo, number, title, branch, author, labels, and blocker summary; multi-repository checkboxes with a tri-state **Select all** toggle; built-in and saved filter presets (`Presets`); a keyboard-first **Command Palette** (`Cmd+K` / `Ctrl+K`); and multi-select **Bulk Actions** (`x` or checkboxes for Sync, Re-run CI, Pin, Snooze, and Draft/Ready); URL-synced filter state.
 - **Non-modal PR inspector**: Slide-over right sidebar on desktop (inline expansion on narrow screens) showing sanitized GitHub Markdown PR descriptions, inline and fullscreen interactive Mermaid diagrams, grouped collapsible CI checks (up to 100) with on-demand inline failure annotations and GitHub Actions log excerpts, reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
 - **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), `Re-run CI` / per-job `Re-run` buttons for failed GitHub Actions checks, and `Sync` button to merge the base branch into behind-base PRs (including drafts, via GitHub's `update-branch` REST API), all same-origin protected.
 - **Live polling & theme**: Configurable auto-refresh (`60s` default; `60s`, `120s`, or `5m`) with tab-focus catch-up plus manual refresh (`r`), GraphQL (`GQL`) and REST (`REST`) rate-limit indicators, live refresh status, and light/dark mode toggle.
@@ -253,8 +253,10 @@ Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0
 
 ## Keyboard Shortcuts
 
+- `Cmd+K` / `Ctrl+K` — open the command palette
 - `j` / `k` — move focus down / up across the action queue
 - `Enter` — open pull request details in the inspector
+- `x` — toggle bulk selection on the focused pull request
 - `o` — open the focused or selected pull request on GitHub
 - `p` — pin or unpin the focused or selected pull request
 - `z` — snooze or unsnooze the focused or selected pull request
@@ -282,6 +284,7 @@ Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0
 - `POST /api/pull/{owner}/{repo}/{number}/threads/{threadId}/resolve` — resolves or reopens a pull request review thread (same-origin protected)
 - `GET /api/repo/{owner}/{repo}/reviewers` — lists assignable repository reviewers (cached 5 minutes per repository)
 - `POST /api/pull/{owner}/{repo}/{number}/reviewers` — requests or removes pull request reviewers (same-origin protected)
+- `GET` / `POST` / `DELETE /api/presets` — lists, saves, and deletes named filter presets in local `.cache/state.json` (mutations same-origin protected)
 
 ## Troubleshooting
 

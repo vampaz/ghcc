@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { APIContext } from 'astro';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getHealth } from '@/pages/api/health';
+import { DELETE as deletePreset, GET as getPresets, POST as postPreset } from '@/pages/api/presets';
 import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
 import { GET as getCheckSummary } from '@/pages/api/pull/[owner]/[repo]/[number]/checks/[checkRunId]/summary';
 import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number]/draft';
@@ -2176,5 +2177,72 @@ describe('API routes (mocked fetch)', () => {
     );
     expect(updateRevRes.status).toBe(200);
     expect(requestedMethods).toEqual(['POST', 'DELETE']);
+  });
+
+  it('persists, lists, and deletes filter presets via /api/presets', async () => {
+    await setupRuntime(vi.fn<typeof fetch>());
+    const sameOriginHeaders = {
+      'sec-fetch-site': 'same-origin',
+      origin: 'http://127.0.0.1:4321',
+      host: '127.0.0.1:4321',
+      'content-type': 'application/json',
+    };
+
+    const initial = await getPresets(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/presets')),
+    );
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toEqual({ presets: [] });
+
+    const crossOrigin = await postPreset(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/presets', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+          body: JSON.stringify({ name: 'Bad', filters: {} }),
+        }),
+      ),
+    );
+    expect(crossOrigin.status).toBe(403);
+
+    const created = await postPreset(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/presets', {
+          method: 'POST',
+          headers: sameOriginHeaders,
+          body: JSON.stringify({
+            name: 'Core Stale',
+            filters: {
+              view: 'mine',
+              bucket: '',
+              q: '',
+              repos: ['acme/core-api'],
+              drafts: false,
+              snoozed: false,
+              staleOnly: true,
+            },
+          }),
+        }),
+      ),
+    );
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as {
+      preset: { id: string; name: string };
+      presets: Array<{ id: string }>;
+    };
+    expect(createdBody.preset.name).toBe('Core Stale');
+    expect(createdBody.presets).toHaveLength(1);
+
+    const deleted = await deletePreset(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/presets', {
+          method: 'DELETE',
+          headers: sameOriginHeaders,
+          body: JSON.stringify({ id: createdBody.preset.id }),
+        }),
+      ),
+    );
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ presets: [] });
   });
 });

@@ -19,6 +19,7 @@ export interface DashboardFilters {
   repoSelection: RepoSelection;
   drafts: boolean;
   snoozed: boolean;
+  staleOnly: boolean;
 }
 
 const VALID_VIEWS = new Set<ViewFilter>(['all', 'mine', 'review', 'team']);
@@ -114,6 +115,7 @@ export function parseFiltersFromSearch(search: string): DashboardFilters {
     repoSelection: parseRepoSelectionFromParams(params),
     drafts: params.get('drafts') === '1',
     snoozed: params.get('snoozed') === '1',
+    staleOnly: params.get('stale') === '1',
   };
 }
 
@@ -139,6 +141,9 @@ export function serializeFiltersToSearch(filters: DashboardFilters): string {
   if (filters.snoozed) {
     params.set('snoozed', '1');
   }
+  if (filters.staleOnly) {
+    params.set('stale', '1');
+  }
   const str = params.toString();
   return str ? `?${str}` : '';
 }
@@ -150,19 +155,24 @@ export function useUrlState() {
   const repoSelection = ref<RepoSelection>(ALL_REPOS_SELECTION);
   const drafts = ref<boolean>(false);
   const snoozed = ref<boolean>(false);
+  const staleOnly = ref<boolean>(false);
   const hydrated = ref<boolean>(false);
+
+  function applyFilters(next: DashboardFilters): void {
+    view.value = next.view;
+    bucket.value = next.bucket;
+    q.value = next.q;
+    repoSelection.value = next.repoSelection;
+    drafts.value = next.drafts;
+    snoozed.value = next.snoozed;
+    staleOnly.value = next.staleOnly;
+  }
 
   function applyFromLocation(): void {
     if (typeof window === 'undefined') {
       return;
     }
-    const parsed = parseFiltersFromSearch(window.location.search);
-    view.value = parsed.view;
-    bucket.value = parsed.bucket;
-    q.value = parsed.q;
-    repoSelection.value = parsed.repoSelection;
-    drafts.value = parsed.drafts;
-    snoozed.value = parsed.snoozed;
+    applyFilters(parseFiltersFromSearch(window.location.search));
   }
 
   function resetFilters(): void {
@@ -172,9 +182,10 @@ export function useUrlState() {
     repoSelection.value = ALL_REPOS_SELECTION;
     drafts.value = false;
     snoozed.value = false;
+    staleOnly.value = false;
   }
 
-  watch([view, bucket, q, repoSelection, drafts, snoozed], () => {
+  watch([view, bucket, q, repoSelection, drafts, snoozed, staleOnly], () => {
     if (typeof window === 'undefined' || !hydrated.value) {
       return;
     }
@@ -185,6 +196,7 @@ export function useUrlState() {
       repoSelection: repoSelection.value,
       drafts: drafts.value,
       snoozed: snoozed.value,
+      staleOnly: staleOnly.value,
     });
     const nextUrl = `${window.location.pathname}${nextSearch}${window.location.hash}`;
     if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) {
@@ -211,6 +223,8 @@ export function useUrlState() {
     repoSelection,
     drafts,
     snoozed,
+    staleOnly,
+    applyFilters,
     resetFilters,
   };
 }
