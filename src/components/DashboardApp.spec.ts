@@ -2644,4 +2644,72 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('badges flaky CI on PR cards and individual flaky checks inside the inspector', async () => {
+    const snap = makeSnapshot({
+      flakyChecks: [
+        {
+          repository: 'acme/core-api',
+          checkName: 'ci / unit',
+          flakeCount: 3,
+          lastFlakedAt: '2026-11-27T11:00:00Z',
+        },
+      ],
+    });
+    snap.pullRequests[0]!.ci.flakyChecks = ['ci / unit'];
+
+    const detail = {
+      ...makeDetail(),
+      checks: [
+        {
+          name: 'ci / unit',
+          kind: 'CheckRun' as const,
+          status: 'COMPLETED',
+          conclusion: 'FAILURE',
+          bucket: 'failing' as const,
+          url: 'https://github.com/acme/core-api/runs/42',
+          description: null,
+          startedAt: null,
+          completedAt: null,
+          checkRunId: 42,
+          workflowRunId: 7,
+        },
+      ],
+    };
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/presets') {
+        return new Response(JSON.stringify({ presets: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/pull/acme/core-api/101') {
+        return new Response(JSON.stringify(detail), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(snap), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"flaky-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    const firstCard = wrapper.find('.action-queue .pr-card');
+    expect(firstCard.text()).toContain('flaky CI');
+
+    await firstCard.find('.pr-card-trigger').trigger('click');
+    await flushPromises();
+
+    const inspector = wrapper.find('.inspector-dialog');
+    expect(inspector.text()).toContain('flaky · 3×');
+
+    wrapper.unmount();
+  });
 });

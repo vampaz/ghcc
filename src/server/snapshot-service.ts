@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { TokenStore } from '@/server/auth';
+import { extractCheckOutcomes } from '@/server/derive/checks';
 import { deriveCiOutages } from '@/server/derive/ci-outages';
+import {
+  annotateFlakyPullRequests,
+  updateFlakeTracker,
+  type PrCheckSnapshot,
+} from '@/server/derive/flakes';
 import {
   computeCounts,
   isActivePullRequest,
@@ -213,10 +219,15 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
               nowMs: currentMs,
               pruneClosed: false,
             });
+            const flakeState = await deps.stateStore
+              .getFlakeTracker()
+              .catch(() => ({ observations: {}, stats: {} }));
+            const flaked = annotateFlakyPullRequests(triaged.pullRequests, flakeState, currentMs);
             const hydratedSnapshot: SnapshotResponse = {
               ...persisted.snapshot,
-              pullRequests: triaged.pullRequests,
-              ciOutages: deriveCiOutages(triaged.pullRequests),
+              pullRequests: flaked.pullRequests,
+              ciOutages: deriveCiOutages(flaked.pullRequests),
+              flakyChecks: flaked.flakyChecks,
             };
             cachedResult = {
               snapshot: hydratedSnapshot,
@@ -571,13 +582,40 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         });
       }
 
+      const checkSnapshots: PrCheckSnapshot[] = merged.map(({ raw }) => ({
+        prKey: `${raw.repository.nameWithOwner}#${raw.number}`,
+        repository: raw.repository.nameWithOwner,
+        headRefOid: raw.headRefOid,
+        checks: extractCheckOutcomes(
+          raw.commits.nodes[0]?.commit.statusCheckRollup ?? null,
+          raw.url,
+        ),
+      }));
+      const prevFlakeState = await deps.stateStore
+        .getFlakeTracker()
+        .catch(() => ({ observations: {}, stats: {} }));
+      const flakeUpdate = updateFlakeTracker(prevFlakeState, checkSnapshots, {
+        nowMs: completedMs,
+      });
+      if (flakeUpdate.changed) {
+        await deps.stateStore.setFlakeTracker(flakeUpdate.nextState).catch(() => {
+          // Best-effort flake persistence; ignore disk errors.
+        });
+      }
+      const flaked = annotateFlakyPullRequests(
+        triaged.pullRequests,
+        flakeUpdate.nextState,
+        completedMs,
+      );
+
       const snapshot: SnapshotResponse = {
         fetchedAt: new Date(completedMs).toISOString(),
         viewer: { login: lastLogin },
         state: lifecycle === 'degraded' ? 'degraded' : 'ready',
-        counts: computeCounts(triaged.pullRequests),
-        pullRequests: triaged.pullRequests,
-        ciOutages: deriveCiOutages(triaged.pullRequests),
+        counts: computeCounts(flaked.pullRequests),
+        pullRequests: flaked.pullRequests,
+        ciOutages: deriveCiOutages(flaked.pullRequests),
+        flakyChecks: flaked.flakyChecks,
         rateLimit: {
           graphql: lastGraphqlLimit,
           core: lastCoreLimit,

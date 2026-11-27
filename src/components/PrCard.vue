@@ -45,6 +45,14 @@
                 shared CI
               </span>
               <span
+                v-if="(pr.ci.flakyChecks?.length ?? 0) > 0"
+                class="tag"
+                data-tone="amber"
+                :title="`Known flaky CI check(s) in this repo: ${pr.ci.flakyChecks!.join(', ')}`"
+              >
+                flaky CI
+              </span>
+              <span
                 v-if="(pr.unresolvedThreadCount ?? 0) > 0"
                 class="tag mono-num"
                 data-tone="amber"

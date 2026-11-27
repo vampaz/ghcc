@@ -51,6 +51,7 @@
         :thread-action-states="threadActionStates"
         :repo-reviewers-state="repoReviewersState"
         :pr-reviewers-state="prReviewersState"
+        :flaky-checks="flakyChecks"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
@@ -111,6 +112,7 @@
       :thread-action-states="threadActionStates"
       :repo-reviewers-state="repoReviewersState"
       :pr-reviewers-state="prReviewersState"
+      :flaky-checks="flakyChecks"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
@@ -168,7 +170,13 @@ import {
   type ThreadActionState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
-import type { MergeMethod, PrView, ReviewEvent, SnoozeCondition } from '@/types/pr';
+import type {
+  FlakyCheckSummary,
+  MergeMethod,
+  PrView,
+  ReviewEvent,
+  SnoozeCondition,
+} from '@/types/pr';
 
 interface Props {
   mode: 'dialog' | 'inline';
@@ -189,6 +197,7 @@ interface Props {
   threadActionStates?: Record<string, ThreadActionState>;
   repoReviewersState?: RepoReviewersState;
   prReviewersState?: PrReviewersState;
+  flakyChecks?: FlakyCheckSummary[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -206,6 +215,7 @@ const props = withDefaults(defineProps<Props>(), {
   threadActionStates: () => ({}),
   repoReviewersState: () => IDLE_REPO_REVIEWERS_STATE,
   prReviewersState: () => IDLE_PR_REVIEWERS_STATE,
+  flakyChecks: () => [],
 });
 
 defineEmits<{

@@ -26,6 +26,7 @@ export interface PrCiInfo {
   failing: CiFailingCheck[];
   pending: number;
   hiddenCount: number;
+  flakyChecks?: string[];
 }
 
 export interface PrReviewInfo {
@@ -154,6 +155,13 @@ export interface CiOutageAlert {
   sampleUrl: string | null;
 }
 
+export interface FlakyCheckSummary {
+  repository: string;
+  checkName: string;
+  flakeCount: number;
+  lastFlakedAt: string;
+}
+
 export interface SnapshotResponse {
   fetchedAt: string;
   viewer: { login: string };
@@ -161,6 +169,7 @@ export interface SnapshotResponse {
   counts: SnapshotCounts;
   pullRequests: PrView[];
   ciOutages?: CiOutageAlert[];
+  flakyChecks?: FlakyCheckSummary[];
   rateLimit: {
     graphql: RateLimitBucket | null;
     core: RateLimitBucket | null;

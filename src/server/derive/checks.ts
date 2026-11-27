@@ -38,6 +38,40 @@ export function classifyStatusContext(
   return { outcome: 'pending', name: node.context, url };
 }
 
+export interface ExtractedCheckOutcome {
+  name: string;
+  outcome: NormalizedContextOutcome;
+}
+
+const OUTCOME_PRECEDENCE: Record<NormalizedContextOutcome, number> = {
+  passing: 0,
+  pending: 1,
+  failing: 2,
+};
+
+export function extractCheckOutcomes(
+  rollup: RawStatusCheckRollup | null,
+  fallbackUrl: string,
+): ExtractedCheckOutcome[] {
+  if (!rollup) {
+    return [];
+  }
+  const rawNodes = rollup.contexts.nodes.filter((n): n is RawStatusCheckContext => n !== null);
+  const byName = new Map<string, NormalizedContextOutcome>();
+  for (const node of rawNodes.slice(0, CONTEXT_CAP)) {
+    const classified = classifyStatusContext(node, fallbackUrl);
+    const name = classified.name.trim();
+    if (!name) {
+      continue;
+    }
+    const existing = byName.get(name);
+    if (!existing || OUTCOME_PRECEDENCE[classified.outcome] > OUTCOME_PRECEDENCE[existing]) {
+      byName.set(name, classified.outcome);
+    }
+  }
+  return Array.from(byName.entries()).map(([name, outcome]) => ({ name, outcome }));
+}
+
 export function deriveCiInfo(rollup: RawStatusCheckRollup | null, fallbackUrl: string): PrCiInfo {
   if (!rollup) {
     return {

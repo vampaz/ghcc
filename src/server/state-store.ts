@@ -36,6 +36,26 @@ export interface PrTriageEntry {
   };
 }
 
+export interface FlakeObservation {
+  headRefOid: string;
+  lastOutcome: 'passing' | 'failing';
+  flakedOnCommit: boolean;
+  updatedAt: string;
+}
+
+export interface FlakeCheckStat {
+  repository: string;
+  checkName: string;
+  flakeCount: number;
+  lastFlakedAt: string;
+  recentPrKeys: string[];
+}
+
+export interface PersistedFlakeTrackerState {
+  observations: Record<string, FlakeObservation>;
+  stats: Record<string, FlakeCheckStat>;
+}
+
 export interface PersistedState {
   version: 1;
   mergeability: Record<string, CachedMergeabilityEntry>;
@@ -43,6 +63,7 @@ export interface PersistedState {
   draftComparisons?: Record<string, CachedDraftComparisonEntry>;
   triage?: Record<string, PrTriageEntry>;
   presets?: SavedFilterPreset[];
+  flakeTracker?: PersistedFlakeTrackerState;
   lastSnapshot?: CachedSnapshotEntry;
 }
 
@@ -53,6 +74,7 @@ const EMPTY_STATE: PersistedState = {
   draftComparisons: {},
   triage: {},
   presets: [],
+  flakeTracker: { observations: {}, stats: {} },
 };
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.cache/state.json');
@@ -82,6 +104,12 @@ export class StateStore {
           draftComparisons: parsed.draftComparisons ? { ...parsed.draftComparisons } : {},
           triage: parsed.triage ? { ...parsed.triage } : {},
           presets: Array.isArray(parsed.presets) ? [...parsed.presets] : [],
+          flakeTracker: parsed.flakeTracker
+            ? {
+                observations: { ...parsed.flakeTracker.observations },
+                stats: { ...parsed.flakeTracker.stats },
+              }
+            : { observations: {}, stats: {} },
           ...(parsed.lastSnapshot?.snapshot && typeof parsed.lastSnapshot.savedAt === 'string'
             ? { lastSnapshot: parsed.lastSnapshot }
             : {}),
@@ -99,6 +127,7 @@ export class StateStore {
       draftComparisons: {},
       triage: {},
       presets: [],
+      flakeTracker: { observations: {}, stats: {} },
     };
     return this.state;
   }
@@ -210,6 +239,23 @@ export class StateStore {
     return [...next];
   }
 
+  async getFlakeTracker(): Promise<PersistedFlakeTrackerState> {
+    const state = await this.load();
+    return {
+      observations: { ...state.flakeTracker?.observations },
+      stats: { ...state.flakeTracker?.stats },
+    };
+  }
+
+  async setFlakeTracker(tracker: PersistedFlakeTrackerState): Promise<void> {
+    const state = await this.load();
+    state.flakeTracker = {
+      observations: { ...tracker.observations },
+      stats: { ...tracker.stats },
+    };
+    await this.persist();
+  }
+
   async getLastSnapshot(): Promise<CachedSnapshotEntry | null> {
     const state = await this.load();
     return state.lastSnapshot ?? null;
@@ -229,6 +275,7 @@ export class StateStore {
       draftComparisons: {},
       triage: {},
       presets: [],
+      flakeTracker: { observations: {}, stats: {} },
     };
     await this.persist();
   }

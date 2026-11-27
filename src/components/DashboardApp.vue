@@ -136,6 +136,7 @@
               :thread-action-states="threadActionStates"
               :repo-reviewers-state="repoReviewersStates[pr.repository]"
               :pr-reviewers-state="prReviewersStates[pr.key]"
+              :flaky-checks="flakyChecks"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
@@ -194,6 +195,7 @@
                 :thread-action-states="threadActionStates"
                 :repo-reviewers-state="repoReviewersStates[pr.repository]"
                 :pr-reviewers-state="prReviewersStates[pr.key]"
+                :flaky-checks="flakyChecks"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
@@ -249,6 +251,7 @@
                 :thread-action-states="threadActionStates"
                 :repo-reviewers-state="repoReviewersStates[pr.repository]"
                 :pr-reviewers-state="prReviewersStates[pr.key]"
+                :flaky-checks="flakyChecks"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
@@ -331,6 +334,7 @@
       :thread-action-states="threadActionStates"
       :repo-reviewers-state="selectedPr ? repoReviewersStates[selectedPr.repository] : undefined"
       :pr-reviewers-state="selectedPr ? prReviewersStates[selectedPr.key] : undefined"
+      :flaky-checks="flakyChecks"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
@@ -403,6 +407,7 @@ import {
 } from '@/composables/use-url-state';
 import type {
   CiOutageAlert,
+  FlakyCheckSummary,
   MergeMethod,
   PrView,
   SavedFilterPreset,
@@ -574,6 +579,7 @@ const isDesktop = ref<boolean>(true);
 
 const allPullRequests = computed<PrView[]>(() => snapshot.value?.pullRequests ?? []);
 const ciOutages = computed<CiOutageAlert[]>(() => snapshot.value?.ciOutages ?? []);
+const flakyChecks = computed<FlakyCheckSummary[]>(() => snapshot.value?.flakyChecks ?? []);
 const dismissedOutageSignatures = ref<Set<string>>(new Set());
 
 const sharedCiByKey = computed<Record<string, string[]>>(() => {

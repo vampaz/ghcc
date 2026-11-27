@@ -259,6 +259,13 @@
                     {{ item.displayName }}
                   </span>
                   <span
+                    v-if="flakyCountForCheck(item.check.name) > 0"
+                    class="flaky-check-badge mono-num"
+                    :title="`Flipped between failing and passing on the same commit ${flakyCountForCheck(item.check.name)} time(s) recently`"
+                  >
+                    flaky · {{ flakyCountForCheck(item.check.name) }}×
+                  </span>
+                  <span
                     v-if="
                       hasInlineSummary(item.check) || isRerunnableJob(item.check) || item.check.url
                     "
@@ -775,6 +782,7 @@ import {
 import type { ResolvedTheme } from '@/composables/use-theme';
 import type {
   CheckAnnotation,
+  FlakyCheckSummary,
   MergeMethod,
   PrDetailCheck,
   PrReviewThread,
@@ -804,6 +812,7 @@ interface Props {
   threadActionStates?: Record<string, ThreadActionState>;
   repoReviewersState?: RepoReviewersState;
   prReviewersState?: PrReviewersState;
+  flakyChecks?: FlakyCheckSummary[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -821,6 +830,7 @@ const props = withDefaults(defineProps<Props>(), {
   threadActionStates: () => ({}),
   repoReviewersState: () => IDLE_REPO_REVIEWERS_STATE,
   prReviewersState: () => IDLE_PR_REVIEWERS_STATE,
+  flakyChecks: () => [],
 });
 
 const emit = defineEmits<{
@@ -861,6 +871,29 @@ const showSyncAction = computed<boolean>(
   () =>
     Boolean(props.pr) && (props.pr?.merge.state === 'behind' || props.syncState.status !== 'idle'),
 );
+
+const flakyCountByCheck = computed<Map<string, number>>(() => {
+  const map = new Map<string, number>();
+  const repo = props.pr?.repository;
+  if (!repo) {
+    return map;
+  }
+  for (const item of props.flakyChecks) {
+    if (item.repository === repo && item.flakeCount > 0) {
+      map.set(item.checkName, item.flakeCount);
+    }
+  }
+  for (const name of props.pr?.ci.flakyChecks ?? []) {
+    if (!map.has(name)) {
+      map.set(name, 1);
+    }
+  }
+  return map;
+});
+
+function flakyCountForCheck(name: string): number {
+  return flakyCountByCheck.value.get(name) ?? 0;
+}
 
 const isSyncBusy = computed<boolean>(
   () => props.syncState.status === 'syncing' || props.syncState.status === 'synced',
@@ -2233,5 +2266,17 @@ async function copyLogExcerpt(checkRunId: number, text: string): Promise<void> {
   font-size: 0.8rem;
   color: var(--ink-secondary);
   overflow-wrap: anywhere;
+}
+
+.flaky-check-badge {
+  flex: 0 0 auto;
+  padding: 0.08rem 0.38rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--accent-amber) 55%, transparent);
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 </style>
