@@ -6,6 +6,7 @@ import {
   mergeRawPullRequests,
   normalizePullRequests,
 } from '@/server/derive/normalize';
+import { applyTriageToPullRequests, entryToTriageInfo } from '@/server/derive/triage';
 import type { RawPullRequest } from '@/server/derive/types';
 import {
   GitHubAuthError,
@@ -14,8 +15,9 @@ import {
   type GitHubClient,
 } from '@/server/github-client';
 import { sanitizeErrorMessage } from '@/server/redact';
-import type { CachedDraftComparisonEntry, StateStore } from '@/server/state-store';
+import type { CachedDraftComparisonEntry, PrTriageEntry, StateStore } from '@/server/state-store';
 import type {
+  PrTriageInfo,
   RateLimitBucket,
   SchedulerState,
   ServerLifecycleState,
@@ -134,6 +136,7 @@ export interface SnapshotService {
   getSnapshot(options?: GetSnapshotOptions): Promise<SnapshotResult>;
   forceRefresh(): Promise<SnapshotResult>;
   invalidateCache(repoKey?: string): void;
+  applyLocalTriageUpdate(prKey: string, entry: PrTriageEntry | null): Promise<PrTriageInfo>;
   getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState };
 }
 
@@ -204,9 +207,18 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
           const savedMs = Date.parse(persisted.savedAt);
           const ageMs = Number.isFinite(savedMs) ? currentMs - savedMs : Number.POSITIVE_INFINITY;
           if (ageMs >= 0 && ageMs < PERSISTED_SNAPSHOT_MAX_AGE_MS && !cachedResult) {
+            const triageMap = await deps.stateStore.getTriageMap().catch(() => ({}));
+            const triaged = applyTriageToPullRequests(persisted.snapshot.pullRequests, triageMap, {
+              nowMs: currentMs,
+              pruneClosed: false,
+            });
+            const hydratedSnapshot: SnapshotResponse = {
+              ...persisted.snapshot,
+              pullRequests: triaged.pullRequests,
+            };
             cachedResult = {
-              snapshot: persisted.snapshot,
-              etag: computeSnapshotEtag(persisted.snapshot),
+              snapshot: hydratedSnapshot,
+              etag: computeSnapshotEtag(hydratedSnapshot),
             };
             lastSnapshotAtMs = savedMs;
             lastLogin = persisted.snapshot.viewer.login || lastLogin;
@@ -546,12 +558,23 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       lastSnapshotAtMs = completedMs;
       backoffUntilMs = 0;
 
+      const triageMap = await deps.stateStore.getTriageMap().catch(() => ({}));
+      const triaged = applyTriageToPullRequests(normalized.pullRequests, triageMap, {
+        nowMs: completedMs,
+        pruneClosed: !isDegraded,
+      });
+      if (triaged.changed) {
+        await deps.stateStore.setTriageMap(triaged.nextTriageMap).catch(() => {
+          // Best-effort triage persistence; ignore disk errors.
+        });
+      }
+
       const snapshot: SnapshotResponse = {
         fetchedAt: new Date(completedMs).toISOString(),
         viewer: { login: lastLogin },
         state: lifecycle === 'degraded' ? 'degraded' : 'ready',
-        counts: computeCounts(normalized.pullRequests),
-        pullRequests: normalized.pullRequests,
+        counts: computeCounts(triaged.pullRequests),
+        pullRequests: triaged.pullRequests,
         rateLimit: {
           graphql: lastGraphqlLimit,
           core: lastCoreLimit,
@@ -707,6 +730,32 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
           entry.fetchedAtMs = 0;
         }
       }
+    },
+
+    async applyLocalTriageUpdate(
+      prKey: string,
+      entry: PrTriageEntry | null,
+    ): Promise<PrTriageInfo> {
+      await deps.stateStore.setPrTriage(prKey, entry);
+      if (cachedResult) {
+        const triageMap = await deps.stateStore.getTriageMap();
+        const triaged = applyTriageToPullRequests(cachedResult.snapshot.pullRequests, triageMap, {
+          nowMs: now(),
+          pruneClosed: false,
+        });
+        const nextSnapshot: SnapshotResponse = {
+          ...cachedResult.snapshot,
+          pullRequests: triaged.pullRequests,
+        };
+        cachedResult = {
+          snapshot: nextSnapshot,
+          etag: computeSnapshotEtag(nextSnapshot),
+        };
+        await deps.stateStore.setLastSnapshot(nextSnapshot, nextSnapshot.fetchedAt).catch(() => {
+          // Best-effort cache persistence; ignore disk errors.
+        });
+      }
+      return entryToTriageInfo(entry);
     },
 
     getStates(): { lifecycle: ServerLifecycleState; scheduler: SchedulerState } {

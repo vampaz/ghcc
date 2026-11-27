@@ -32,10 +32,11 @@
     <main class="dashboard-main">
       <div class="dashboard-controls">
         <KpiStrip
-          :pull-requests="scopedPulls"
+          :pull-requests="activeScopedPulls"
           :active-bucket="bucket"
           :now-ms="nowMs"
           :waiting-includes-team="view === 'team'"
+          :snoozed-needs-me-count="snoozedNeedsMeCount"
           @select-bucket="onSelectBucket"
         />
 
@@ -48,12 +49,15 @@
           :pull-requests="ownershipFilteredPulls"
           :drafts="drafts"
           :draft-count="draftPullRequests.length"
+          :snoozed="snoozed"
+          :snoozed-count="snoozedPullRequests.length"
           @update:view="view = $event"
           @update:bucket="bucket = $event"
           @update:q="q = $event"
           @toggle-repo="onToggleRepo"
           @toggle-all="onToggleAllRepos"
           @update:drafts="drafts = $event"
+          @update:snoozed="snoozed = $event"
           @clear="resetFilters"
         />
       </div>
@@ -66,12 +70,18 @@
           :is-loading="clientState === 'initializing' && !snapshot"
           :active-bucket="bucket"
           :has-filters="hasActiveFilters"
+          :has-search-query="q.trim().length > 0"
+          :show-snoozed="snoozed"
+          :snoozed-count="snoozedPullRequests.length"
+          :ready-count="readyPullRequests.length"
+          :waiting-count="waitingPullRequests.length"
           :sync-states="syncStates"
           :draft-states="draftStates"
           :merge-states="mergeStates"
           :repo-labels-states="repoLabelsStates"
           :label-states="labelStates"
           :rerun-states="rerunStates"
+          :triage-states="triageStates"
           @select="onSelectPr"
           @sync="syncPullRequest"
           @rerun-checks="rerunPullChecks"
@@ -80,6 +90,11 @@
           @load-labels="onLoadLabels"
           @retry-load-labels="onRetryLoadLabels"
           @update-labels="updatePullLabels"
+          @toggle-pin="onTogglePin"
+          @snooze="onSnoozePr"
+          @unsnooze="onUnsnoozePr"
+          @show-snoozed="snoozed = true"
+          @select-bucket="onSelectBucket"
         >
           <template #inline-inspector="{ pr }">
             <PrInspector
@@ -96,11 +111,15 @@
               :label-state="labelStates[pr.key]"
               :rerun-state="rerunStates[pr.key]"
               :check-summary-states="checkSummaryStates"
+              :triage-state="triageStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
               @rerun-checks="rerunPullChecks"
               @load-check-summary="loadCheckSummary"
+              @toggle-pin="onTogglePin"
+              @snooze="onSnoozePr"
+              @unsnooze="onUnsnoozePr"
               @toggle-draft="togglePullDraft"
               @request-merge="openMergeConfirm"
               @load-labels="onLoadLabels"
@@ -139,11 +158,15 @@
                 :label-state="labelStates[pr.key]"
                 :rerun-state="rerunStates[pr.key]"
                 :check-summary-states="checkSummaryStates"
+                :triage-state="triageStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
                 @rerun-checks="rerunPullChecks"
                 @load-check-summary="loadCheckSummary"
+                @toggle-pin="onTogglePin"
+                @snooze="onSnoozePr"
+                @unsnooze="onUnsnoozePr"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -179,11 +202,15 @@
                 :label-state="labelStates[pr.key]"
                 :rerun-state="rerunStates[pr.key]"
                 :check-summary-states="checkSummaryStates"
+                :triage-state="triageStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
                 @rerun-checks="rerunPullChecks"
                 @load-check-summary="loadCheckSummary"
+                @toggle-pin="onTogglePin"
+                @snooze="onSnoozePr"
+                @unsnooze="onUnsnoozePr"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -203,6 +230,8 @@
           <span><kbd>j</kbd>/<kbd>k</kbd> navigate</span>
           <span><kbd>Enter</kbd> inspect</span>
           <span><kbd>o</kbd> open on GitHub</span>
+          <span><kbd>p</kbd> pin</span>
+          <span><kbd>z</kbd> snooze</span>
           <span><kbd>/</kbd> search</span>
           <span><kbd>r</kbd> refresh</span>
           <span><kbd>Esc</kbd> close / clear</span>
@@ -227,11 +256,15 @@
       :label-state="selectedPr ? labelStates[selectedPr.key] : undefined"
       :rerun-state="selectedPr ? rerunStates[selectedPr.key] : undefined"
       :check-summary-states="checkSummaryStates"
+      :triage-state="selectedPr ? triageStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
       @rerun-checks="rerunPullChecks"
       @load-check-summary="loadCheckSummary"
+      @toggle-pin="onTogglePin"
+      @snooze="onSnoozePr"
+      @unsnooze="onUnsnoozePr"
       @toggle-draft="togglePullDraft"
       @request-merge="openMergeConfirm"
       @load-labels="onLoadLabels"
@@ -283,8 +316,9 @@ import {
   toggleRepoInSelection,
   useUrlState,
 } from '@/composables/use-url-state';
-import type { MergeMethod, PrView } from '@/types/pr';
+import type { MergeMethod, PrView, SnoozeCondition } from '@/types/pr';
 import { isPrReadyToMerge } from '@/utils/ready-to-merge';
+import { isPrPinned, isPrSnoozed } from '@/utils/triage';
 
 type MergeConfirmState =
   | { status: 'closed' }
@@ -313,10 +347,12 @@ const {
   labelStates,
   rerunStates,
   checkSummaryStates,
+  triageStates,
   fetchSnapshot,
   syncPullRequest,
   rerunPullChecks,
   loadCheckSummary,
+  updatePullTriage,
   togglePullDraft,
   mergePullRequest,
   loadRepoLabels,
@@ -332,6 +368,18 @@ function onLoadLabels(pr: PrView): void {
 
 function onRetryLoadLabels(pr: PrView): void {
   void loadRepoLabels(pr.owner, pr.repo, true);
+}
+
+function onTogglePin(pr: PrView): void {
+  void updatePullTriage(pr, isPrPinned(pr) ? 'unpin' : 'pin');
+}
+
+function onSnoozePr(pr: PrView, condition: SnoozeCondition): void {
+  void updatePullTriage(pr, 'snooze', condition);
+}
+
+function onUnsnoozePr(pr: PrView): void {
+  void updatePullTriage(pr, 'unsnooze');
 }
 
 const mergeConfirm = ref<MergeConfirmState>({ status: 'closed' });
@@ -362,7 +410,7 @@ async function onConfirmMerge(pr: PrView, mergeMethod: MergeMethod): Promise<voi
 }
 
 const { resolvedTheme, toggleTheme } = useTheme();
-const { view, bucket, q, repoSelection, drafts, resetFilters } = useUrlState();
+const { view, bucket, q, repoSelection, drafts, snoozed, resetFilters } = useUrlState();
 
 const filterBarRef = ref<InstanceType<typeof FilterBar> | null>(null);
 const cursorKey = ref<string | null>(null);
@@ -426,28 +474,50 @@ const scopedPulls = computed<PrView[]>(() =>
     : filteredBasePulls.value.filter((pr) => pr.bucket !== 'draft'),
 );
 
+const snoozedPullRequests = computed<PrView[]>(() => scopedPulls.value.filter(isPrSnoozed));
+
+const snoozedNeedsMeCount = computed<number>(
+  () => scopedPulls.value.filter((pr) => pr.bucket === 'needs-me' && isPrSnoozed(pr)).length,
+);
+
+const activeScopedPulls = computed<PrView[]>(() =>
+  scopedPulls.value.filter((pr) => !isPrSnoozed(pr)),
+);
+
+const visibleScopedPulls = computed<PrView[]>(() =>
+  snoozed.value ? scopedPulls.value : activeScopedPulls.value,
+);
+
 const primaryQueuePulls = computed<PrView[]>(() => {
+  const baseForBucket = snoozed.value
+    ? filteredBasePulls.value
+    : filteredBasePulls.value.filter((pr) => !isPrSnoozed(pr));
   if (bucket.value === 'ci-failing') {
-    return scopedPulls.value.filter((pr) => pr.ci.state === 'failing');
+    return visibleScopedPulls.value.filter((pr) => pr.ci.state === 'failing');
   }
   if (bucket.value === 'waiting') {
-    return filteredBasePulls.value.filter(
+    return baseForBucket.filter(
       (pr) => pr.bucket === 'waiting' && (view.value === 'team' || pr.sources.includes('authored')),
     );
   }
   if (bucket.value) {
-    return filteredBasePulls.value.filter((pr) => pr.bucket === bucket.value);
+    return baseForBucket.filter((pr) => pr.bucket === bucket.value);
   }
-  return scopedPulls.value;
+  return visibleScopedPulls.value;
 });
 
 const readyPullRequests = computed<PrView[]>(() =>
-  filteredBasePulls.value.filter(isPrReadyToMerge),
+  filteredBasePulls.value.filter(
+    (pr) => isPrReadyToMerge(pr) && (snoozed.value || !isPrSnoozed(pr)),
+  ),
 );
 
 const waitingPullRequests = computed<PrView[]>(() =>
   filteredBasePulls.value.filter(
-    (pr) => pr.bucket === 'waiting' && pr.sources.includes('authored'),
+    (pr) =>
+      pr.bucket === 'waiting' &&
+      pr.sources.includes('authored') &&
+      (snoozed.value || !isPrSnoozed(pr)),
   ),
 );
 
@@ -463,7 +533,8 @@ const hasActiveFilters = computed<boolean>(() => {
     bucket.value !== '' ||
     q.value.trim() !== '' ||
     repoSelection.value.mode !== 'all' ||
-    drafts.value
+    drafts.value ||
+    snoozed.value
   );
 });
 
@@ -511,7 +582,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .refresh-btn';
+  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .snooze-picker-popover, .refresh-btn';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {
@@ -621,6 +692,31 @@ function onGlobalKeydown(event: KeyboardEvent): void {
       event.preventDefault();
       window.open(targetPr.url, '_blank', 'noopener,noreferrer');
     }
+    return;
+  }
+
+  if (event.key === 'p' || event.key === 'z') {
+    const key =
+      (document.activeElement instanceof HTMLElement
+        ? document.activeElement.dataset.prKey
+        : undefined) ?? activeKey.value;
+    const targetPr = allPullRequests.value.find((p) => p.key === key);
+    if (!targetPr) {
+      return;
+    }
+    event.preventDefault();
+    if (event.key === 'p') {
+      onTogglePin(targetPr);
+      return;
+    }
+    if (isPrSnoozed(targetPr)) {
+      onUnsnoozePr(targetPr);
+      return;
+    }
+    const trigger = document.querySelector<HTMLButtonElement>(
+      `[data-snooze-trigger="${CSS.escape(targetPr.key)}"]`,
+    );
+    trigger?.click();
   }
 }
 

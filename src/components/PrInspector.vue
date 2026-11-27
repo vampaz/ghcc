@@ -45,12 +45,16 @@
         :label-state="labelState"
         :rerun-state="rerunState"
         :check-summary-states="checkSummaryStates"
+        :triage-state="triageState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
         @load-check-summary="
           (target, checkRunId, options) => $emit('load-check-summary', target, checkRunId, options)
         "
+        @toggle-pin="$emit('toggle-pin', $event)"
+        @snooze="(target, condition) => $emit('snooze', target, condition)"
+        @unsnooze="$emit('unsnooze', $event)"
         @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
         @request-merge="(target, method) => $emit('request-merge', target, method)"
         @load-labels="$emit('load-labels', $event)"
@@ -88,12 +92,16 @@
       :label-state="labelState"
       :rerun-state="rerunState"
       :check-summary-states="checkSummaryStates"
+      :triage-state="triageState"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
       @load-check-summary="
         (target, checkRunId, options) => $emit('load-check-summary', target, checkRunId, options)
       "
+      @toggle-pin="$emit('toggle-pin', $event)"
+      @snooze="(target, condition) => $emit('snooze', target, condition)"
+      @unsnooze="$emit('unsnooze', $event)"
       @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
       @request-merge="(target, method) => $emit('request-merge', target, method)"
       @load-labels="$emit('load-labels', $event)"
@@ -114,6 +122,7 @@ import {
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_PR_TRIAGE_STATE,
   IDLE_REPO_LABELS_STATE,
   type CheckSummaryState,
   type InspectorState,
@@ -122,10 +131,11 @@ import {
   type PrMergeState,
   type PrRerunState,
   type PrSyncState,
+  type PrTriageState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
-import type { MergeMethod, PrView } from '@/types/pr';
+import type { MergeMethod, PrView, SnoozeCondition } from '@/types/pr';
 
 interface Props {
   mode: 'dialog' | 'inline';
@@ -140,6 +150,7 @@ interface Props {
   labelState?: PrLabelsState;
   rerunState?: PrRerunState;
   checkSummaryStates?: Record<string, CheckSummaryState>;
+  triageState?: PrTriageState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -151,6 +162,7 @@ const props = withDefaults(defineProps<Props>(), {
   labelState: () => IDLE_PR_LABELS_STATE,
   rerunState: () => IDLE_PR_RERUN_STATE,
   checkSummaryStates: () => ({}),
+  triageState: () => IDLE_PR_TRIAGE_STATE,
 });
 
 defineEmits<{
@@ -168,6 +180,9 @@ defineEmits<{
   'load-labels': [pr: PrView];
   'retry-load-labels': [pr: PrView];
   'update-labels': [pr: PrView, labels: string[]];
+  'toggle-pin': [pr: PrView];
+  snooze: [pr: PrView, condition: SnoozeCondition];
+  unsnooze: [pr: PrView];
   'open-mermaid': [source: string];
 }>();
 

@@ -11,6 +11,7 @@ import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number
 import { POST as postPullLabels } from '@/pages/api/pull/[owner]/[repo]/[number]/labels';
 import { POST as postMergePull } from '@/pages/api/pull/[owner]/[repo]/[number]/merge';
 import { POST as postRerunFailed } from '@/pages/api/pull/[owner]/[repo]/[number]/rerun-failed';
+import { POST as postTriage } from '@/pages/api/pull/[owner]/[repo]/[number]/triage';
 import { POST as postUpdateBranch } from '@/pages/api/pull/[owner]/[repo]/[number]/update-branch';
 import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
 import { GET as getRepoLabels } from '@/pages/api/repo/[owner]/[repo]/labels';
@@ -1874,5 +1875,127 @@ describe('API routes (mocked fetch)', () => {
     const blockedBody = (await blockedRes.json()) as { logUnavailableReason: string | null };
     expect(blockedBody.logUnavailableReason).toContain('Blocked unexpected log redirect');
     expect(evilFetchCount).toBe(0);
+  });
+
+  it('persists pin and snooze via POST /api/pull/:owner/:repo/:number/triage and updates snapshot ETag without GitHub calls', async () => {
+    let graphqlCalls = 0;
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      graphqlCalls++;
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+      if (parsed.query?.includes('query Snapshot')) {
+        return jsonResponse({
+          data: {
+            viewer: {
+              login: VIEWER_LOGIN,
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [fixtureNoCiRollup],
+              },
+            },
+          },
+        });
+      }
+      return jsonResponse({ data: { search: { nodes: [] } } });
+    });
+
+    await setupRuntime(fetchFn);
+
+    const initialSnap = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(initialSnap.status).toBe(200);
+    const initialEtag = initialSnap.headers.get('etag');
+    const callsAfterInitial = graphqlCalls;
+
+    // Cross-origin triage POST is forbidden
+    const crossOrigin = await postTriage(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/docs/202/triage', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+          body: JSON.stringify({ action: 'pin' }),
+        }),
+        { owner: 'acme', repo: 'docs', number: '202' },
+      ),
+    );
+    expect(crossOrigin.status).toBe(403);
+
+    // Missing condition for snooze returns 400
+    const badSnooze = await postTriage(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/docs/202/triage', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ action: 'snooze' }),
+        }),
+        { owner: 'acme', repo: 'docs', number: '202' },
+      ),
+    );
+    expect(badSnooze.status).toBe(400);
+
+    // Pinning updates cached snapshot immediately with zero GitHub calls
+    const pinRes = await postTriage(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/docs/202/triage', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ action: 'pin' }),
+        }),
+        { owner: 'acme', repo: 'docs', number: '202' },
+      ),
+    );
+    expect(pinRes.status).toBe(200);
+    expect(await pinRes.json()).toMatchObject({
+      ok: true,
+      key: 'acme/docs#202',
+      triage: { pinned: true, isSnoozed: false },
+    });
+
+    const afterPinSnap = await getSnapshot(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/snapshot')),
+    );
+    expect(afterPinSnap.headers.get('etag')).not.toBe(initialEtag);
+    expect(graphqlCalls).toBe(callsAfterInitial);
+    const afterPinBody = (await afterPinSnap.json()) as SnapshotResponse;
+    expect(afterPinBody.pullRequests[0]?.triage?.pinned).toBe(true);
+
+    // Snoozing clears pin and marks PR snoozed
+    const snoozeRes = await postTriage(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/docs/202/triage', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            action: 'snooze',
+            condition: { kind: 'until-push', headRefOid: fixtureNoCiRollup.headRefOid },
+          }),
+        }),
+        { owner: 'acme', repo: 'docs', number: '202' },
+      ),
+    );
+    expect(snoozeRes.status).toBe(200);
+    expect(await snoozeRes.json()).toMatchObject({
+      ok: true,
+      triage: {
+        pinned: false,
+        isSnoozed: true,
+        snoozeCondition: { kind: 'until-push' },
+      },
+    });
   });
 });

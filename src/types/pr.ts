@@ -54,6 +54,22 @@ export interface PrLabel {
   description: string | null;
 }
 
+export type SnoozeCondition =
+  | { kind: 'until-time'; untilIso: string }
+  | { kind: 'until-push'; headRefOid: string }
+  | { kind: 'until-ci-change'; ciState: PrCiInfo['state']; headRefOid: string }
+  | { kind: 'until-activity'; updatedAt: string };
+
+export interface PrTriageInfo {
+  pinned: boolean;
+  pinnedAt?: string;
+  isSnoozed: boolean;
+  snoozedAt?: string;
+  snoozeCondition?: SnoozeCondition;
+}
+
+export type TriageAction = 'pin' | 'unpin' | 'snooze' | 'unsnooze';
+
 export interface PrView {
   key: string;
   owner: string;
@@ -89,6 +105,7 @@ export interface PrView {
   ageDays: number;
   idleDays: number;
   blockerSummary: string;
+  triage?: PrTriageInfo;
 }
 
 export interface RateLimitBucket {
@@ -263,4 +280,10 @@ export interface CheckSummaryResponse {
   logTruncated: boolean;
   logUnavailableReason: string | null;
   detailsUrl: string | null;
+}
+
+export interface UpdateTriageResponse {
+  ok: true;
+  key: string;
+  triage: PrTriageInfo;
 }

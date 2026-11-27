@@ -4,7 +4,7 @@ A local and self-hosted web dashboard for pull requests you authored, pull reque
 
 ## Features
 
-- **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); prioritized **Action Queue** (including your authored waiting PRs) alongside a side rail with **Ready to Merge** and **Waiting on Others** quick-jump panels, plus a `stale` badge after more than 3 idle days.
+- **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); prioritized **Action Queue** (including your authored waiting PRs) with local **Pin** and conditional **Snooze** (until next push, CI change, new activity, or timer) persisted in `.cache/state.json`, an **Inbox Zero** clear state, a side rail with **Ready to Merge** and **Waiting on Others** quick-jump panels, and a `stale` badge after more than 3 idle days.
 - **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, labels, and blocker summary; multi-repository checkboxes with a tri-state **Select all** toggle in the filter bar's **All repos** dropdown; URL-synced filter state.
 - **Non-modal PR inspector**: Slide-over right sidebar on desktop (inline expansion on narrow screens) showing sanitized GitHub Markdown PR descriptions, inline and fullscreen interactive Mermaid diagrams, grouped collapsible CI checks (up to 100) with on-demand inline failure annotations and GitHub Actions log excerpts, reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
 - **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), `Re-run CI` / per-job `Re-run` buttons for failed GitHub Actions checks, and `Sync` button to merge the base branch into behind-base PRs (including drafts, via GitHub's `update-branch` REST API), all same-origin protected.
@@ -256,6 +256,8 @@ Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0
 - `j` / `k` — move focus down / up across the action queue
 - `Enter` — open pull request details in the inspector
 - `o` — open the focused or selected pull request on GitHub
+- `p` — pin or unpin the focused or selected pull request
+- `z` — snooze or unsnooze the focused or selected pull request
 - `r` — trigger a manual refresh (10s cooldown)
 - `/` — focus the search input
 - `Esc` — close the inspector, clear/blur search, or clear active filters
@@ -274,6 +276,7 @@ Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0
 - `POST /api/pull/{owner}/{repo}/{number}/merge` — merges a pull request via GitHub's merge API (`squash` by default or `merge` commit, same-origin protected)
 - `POST /api/pull/{owner}/{repo}/{number}/rerun-failed` — re-runs failed GitHub Actions workflow runs for the pull request head commit or a specific failed Actions job/run (same-origin protected)
 - `GET /api/pull/{owner}/{repo}/{number}/checks/{checkRunId}/summary` — loads check run output, annotations (up to 25), and bounded plain-text GitHub Actions job log excerpts on demand for failing checks in the inspector
+- `POST /api/pull/{owner}/{repo}/{number}/triage` — pins, unpins, snoozes (by time, next push, CI change, or activity), or unsnoozes a pull request in local `.cache/state.json` (same-origin protected)
 
 ## Troubleshooting
 

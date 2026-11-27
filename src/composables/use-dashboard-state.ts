@@ -9,10 +9,14 @@ import type {
   RepoLabelsResponse,
   RerunFailedChecksResponse,
   SnapshotResponse,
+  SnoozeCondition,
   ToggleDraftResponse,
+  TriageAction,
   UpdateBranchResponse,
   UpdateLabelsResponse,
+  UpdateTriageResponse,
 } from '@/types/pr';
+import { sortPullsPinnedFirst } from '@/utils/triage';
 
 export type ClientUiState = 'initializing' | 'live' | 'refreshing' | 'offline';
 
@@ -108,6 +112,44 @@ export const IDLE_CHECK_SUMMARY_STATE: CheckSummaryState = { status: 'idle' };
 
 export function checkSummaryKey(prKey: string, checkRunId: number): string {
   return `${prKey}:${checkRunId}`;
+}
+
+export type PrTriageState =
+  | { status: 'idle' }
+  | { status: 'saving'; action: TriageAction }
+  | { status: 'error'; error: string };
+
+export type PrTriageEvent =
+  | { type: 'TRIAGE_REQUEST'; action: TriageAction }
+  | { type: 'TRIAGE_SUCCEEDED' }
+  | { type: 'TRIAGE_FAILED'; error: string }
+  | { type: 'RESET' };
+
+export const IDLE_PR_TRIAGE_STATE: PrTriageState = { status: 'idle' };
+
+export function transitionPrTriageState(
+  current: PrTriageState,
+  event: PrTriageEvent,
+): PrTriageState {
+  if (event.type === 'RESET') {
+    return IDLE_PR_TRIAGE_STATE;
+  }
+  switch (current.status) {
+    case 'idle':
+    case 'error':
+      if (event.type === 'TRIAGE_REQUEST') {
+        return { status: 'saving', action: event.action };
+      }
+      return current;
+    case 'saving':
+      if (event.type === 'TRIAGE_SUCCEEDED') {
+        return IDLE_PR_TRIAGE_STATE;
+      }
+      if (event.type === 'TRIAGE_FAILED') {
+        return { status: 'error', error: event.error };
+      }
+      return current;
+  }
 }
 
 export function transitionPrRerunState(current: PrRerunState, event: PrRerunEvent): PrRerunState {
@@ -303,6 +345,7 @@ export function useDashboardState(
   const labelStates = ref<Record<string, PrLabelsState>>({});
   const rerunStates = ref<Record<string, PrRerunState>>({});
   const checkSummaryStates = ref<Record<string, CheckSummaryState>>({});
+  const triageStates = ref<Record<string, PrTriageState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -1000,6 +1043,98 @@ export function useDashboardState(
     }
   }
 
+  function getTriageState(prKey: string): PrTriageState {
+    return triageStates.value[prKey] ?? IDLE_PR_TRIAGE_STATE;
+  }
+
+  function setTriageState(prKey: string, next: PrTriageState): void {
+    if (next.status === 'idle') {
+      if (!(prKey in triageStates.value)) {
+        return;
+      }
+      const copy = { ...triageStates.value };
+      delete copy[prKey];
+      triageStates.value = copy;
+      return;
+    }
+    triageStates.value = {
+      ...triageStates.value,
+      [prKey]: next,
+    };
+  }
+
+  async function updatePullTriage(
+    pr: PrView,
+    action: TriageAction,
+    condition?: SnoozeCondition,
+  ): Promise<boolean> {
+    const current = getTriageState(pr.key);
+    if (current.status === 'saving') {
+      return false;
+    }
+
+    setTriageState(pr.key, transitionPrTriageState(current, { type: 'TRIAGE_REQUEST', action }));
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/triage`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(
+            action === 'snooze' && condition ? { action, condition } : { action },
+          ),
+        },
+      );
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to update triage state (HTTP ${response.status})`);
+      }
+
+      const data = (await response.json()) as UpdateTriageResponse;
+      setTriageState(
+        pr.key,
+        transitionPrTriageState(getTriageState(pr.key), { type: 'TRIAGE_SUCCEEDED' }),
+      );
+
+      if (snapshot.value) {
+        const updatedPulls = snapshot.value.pullRequests.map((item) =>
+          item.key === pr.key ? { ...item, triage: data.triage } : item,
+        );
+        snapshot.value = {
+          ...snapshot.value,
+          pullRequests: sortPullsPinnedFirst(updatedPulls),
+        };
+      }
+
+      const actionLabel =
+        action === 'pin'
+          ? `Pinned ${pr.key}.`
+          : action === 'unpin'
+            ? `Unpinned ${pr.key}.`
+            : action === 'snooze'
+              ? `Snoozed ${pr.key}.`
+              : `Unsnoozed ${pr.key}.`;
+      announcement.value = actionLabel;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update triage state';
+      setTriageState(
+        pr.key,
+        transitionPrTriageState(getTriageState(pr.key), {
+          type: 'TRIAGE_FAILED',
+          error: message,
+        }),
+      );
+      announcement.value = `Failed to update triage state for ${pr.key}: ${message}`;
+      return false;
+    }
+  }
+
   async function togglePullDraft(pr: PrView, nextDraft?: boolean): Promise<void> {
     const targetDraft = nextDraft ?? !pr.isDraft;
     const current = getDraftState(pr.key);
@@ -1354,10 +1489,12 @@ export function useDashboardState(
     labelStates,
     rerunStates,
     checkSummaryStates,
+    triageStates,
     fetchSnapshot,
     syncPullRequest,
     rerunPullChecks,
     loadCheckSummary,
+    updatePullTriage,
     togglePullDraft,
     mergePullRequest,
     loadRepoLabels,

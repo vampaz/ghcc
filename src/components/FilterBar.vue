@@ -28,6 +28,25 @@
       </span>
     </label>
 
+    <label
+      v-if="snoozedCount > 0 || snoozed"
+      for="include-snoozed"
+      class="drafts-checkbox"
+      :class="{ active: snoozed }"
+    >
+      <input
+        id="include-snoozed"
+        type="checkbox"
+        class="drafts-checkbox-input"
+        :checked="snoozed"
+        @change="onSnoozedChange"
+      />
+      <span class="drafts-checkbox-label">
+        Show snoozed
+        <span class="drafts-count mono-num">({{ snoozedCount }})</span>
+      </span>
+    </label>
+
     <div class="control-item search-wrap">
       <label for="pr-search" class="visually-hidden">Search pull requests</label>
       <input
@@ -83,9 +102,14 @@ interface Props {
   pullRequests: PrView[];
   drafts: boolean;
   draftCount: number;
+  snoozed?: boolean;
+  snoozedCount?: number;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  snoozed: false,
+  snoozedCount: 0,
+});
 
 const emit = defineEmits<{
   'update:view': [value: ViewFilter];
@@ -94,6 +118,7 @@ const emit = defineEmits<{
   toggleRepo: [repo: string, allRepos: string[]];
   toggleAll: [allRepos: string[]];
   'update:drafts': [value: boolean];
+  'update:snoozed': [value: boolean];
   clear: [];
 }>();
 
@@ -130,13 +155,19 @@ const hasActiveFilters = computed<boolean>(() => {
     props.bucket !== '' ||
     props.q.trim() !== '' ||
     props.repoSelection.mode !== 'all' ||
-    props.drafts
+    props.drafts ||
+    props.snoozed
   );
 });
 
 function onDraftsChange(event: Event): void {
   const input = event.target as HTMLInputElement;
   emit('update:drafts', input.checked);
+}
+
+function onSnoozedChange(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  emit('update:snoozed', input.checked);
 }
 
 function onToggleRepo(repo: string, allRepos: string[]): void {

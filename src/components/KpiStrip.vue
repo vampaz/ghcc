@@ -10,7 +10,10 @@
       <span class="kpi-label">Needs You</span>
       <span class="kpi-main">
         <span class="kpi-value mono-num" data-tone="warn">{{ needsMeCount }}</span>
-        <span class="kpi-sub tabular">{{ needsCiOrConflict }} CI/conf · {{ needsReview }} rev</span>
+        <span class="kpi-sub tabular">
+          {{ needsCiOrConflict }} CI/conf · {{ needsReview }} rev
+          <template v-if="snoozedNeedsMeCount > 0"> · +{{ snoozedNeedsMeCount }} snoozed</template>
+        </span>
       </span>
     </button>
 
@@ -82,11 +85,13 @@ interface Props {
   activeBucket: BucketFilter;
   nowMs?: number;
   waitingIncludesTeam?: boolean;
+  snoozedNeedsMeCount?: number;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   nowMs: () => Date.now(),
   waitingIncludesTeam: false,
+  snoozedNeedsMeCount: 0,
 });
 
 defineEmits<{

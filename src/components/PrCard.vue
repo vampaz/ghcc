@@ -3,6 +3,8 @@
     class="pr-card"
     :class="{
       selected: isSelected,
+      pinned: isPinned,
+      snoozed: isSnoozed,
       'stale-warm': pr.idleDays > 3 && pr.idleDays <= 7,
       'stale-hot': pr.idleDays > 7,
     }"
@@ -19,6 +21,8 @@
         <span class="pr-top-row">
           <span class="pr-key mono-num">{{ pr.key }}</span>
           <span class="pr-tags">
+            <span v-if="isPinned" class="tag" data-tone="blue">pinned</span>
+            <span v-if="isSnoozed" class="tag" data-tone="muted">{{ snoozeBadgeText }}</span>
             <span v-if="!pr.sources.includes('authored')" class="tag" data-tone="muted">
               @{{ pr.author }}
             </span>
@@ -94,6 +98,28 @@
       </button>
 
       <div class="pr-card-actions">
+        <button
+          type="button"
+          class="pin-btn"
+          :class="{ active: isPinned }"
+          :aria-pressed="isPinned ? 'true' : 'false'"
+          :aria-disabled="triageState.status === 'saving' ? 'true' : undefined"
+          :aria-label="`${isPinned ? 'Unpin' : 'Pin'} — ${pr.key}`"
+          :title="isPinned ? 'Unpin pull request (p)' : 'Pin pull request to top (p)'"
+          @click="onPinClick"
+        >
+          <CarbonIcon :name="isPinned ? 'pin-filled' : 'pin'" :size="13" />
+        </button>
+
+        <SnoozePicker
+          compact
+          :pr="pr"
+          :now-ms="nowMs"
+          :triage-state="triageState"
+          @snooze="(target, condition) => $emit('snooze', target, condition)"
+          @unsnooze="$emit('unsnooze', $event)"
+        />
+
         <LabelPicker
           compact
           :pr="pr"
@@ -200,6 +226,10 @@
       {{ rerunState.error }}
     </p>
 
+    <p v-if="triageState.status === 'error'" class="sync-error" role="alert">
+      {{ triageState.error }}
+    </p>
+
     <slot name="inline-inspector" />
   </li>
 </template>
@@ -210,22 +240,26 @@ import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
 import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
+import SnoozePicker from '@/components/SnoozePicker.vue';
 import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_PR_TRIAGE_STATE,
   IDLE_REPO_LABELS_STATE,
   type PrDraftState,
   type PrLabelsState,
   type PrMergeState,
   type PrRerunState,
   type PrSyncState,
+  type PrTriageState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
-import type { MergeMethod, PrView } from '@/types/pr';
+import type { MergeMethod, PrView, SnoozeCondition } from '@/types/pr';
 import { formatIdleCompact } from '@/utils/format';
+import { formatSnoozeBadge, isPrPinned, isPrSnoozed } from '@/utils/triage';
 
 interface Props {
   pr: PrView;
@@ -237,6 +271,7 @@ interface Props {
   repoLabelsState?: RepoLabelsState;
   labelState?: PrLabelsState;
   rerunState?: PrRerunState;
+  triageState?: PrTriageState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -246,6 +281,7 @@ const props = withDefaults(defineProps<Props>(), {
   repoLabelsState: () => IDLE_REPO_LABELS_STATE,
   labelState: () => IDLE_PR_LABELS_STATE,
   rerunState: () => IDLE_PR_RERUN_STATE,
+  triageState: () => IDLE_PR_TRIAGE_STATE,
 });
 
 const emit = defineEmits<{
@@ -257,7 +293,23 @@ const emit = defineEmits<{
   'load-labels': [pr: PrView];
   'retry-load-labels': [pr: PrView];
   'update-labels': [pr: PrView, labels: string[]];
+  'toggle-pin': [pr: PrView];
+  snooze: [pr: PrView, condition: SnoozeCondition];
+  unsnooze: [pr: PrView];
 }>();
+
+const isPinned = computed<boolean>(() => isPrPinned(props.pr));
+const isSnoozed = computed<boolean>(() => isPrSnoozed(props.pr));
+const snoozeBadgeText = computed<string>(() =>
+  formatSnoozeBadge(props.pr.triage?.snoozeCondition, props.nowMs),
+);
+
+function onPinClick(): void {
+  if (props.triageState.status === 'saving') {
+    return;
+  }
+  emit('toggle-pin', props.pr);
+}
 
 const showRerunButton = computed<boolean>(
   () => props.pr.ci.state === 'failing' || props.rerunState.status !== 'idle',
@@ -434,6 +486,40 @@ const diffWidths = computed(() => {
 .pr-card.selected {
   border-color: var(--accent-blue);
   box-shadow: 0 0 0 1px var(--accent-blue);
+}
+
+.pr-card.pinned {
+  border-color: color-mix(in srgb, var(--accent-blue) 45%, var(--border-subtle));
+}
+
+.pr-card.snoozed {
+  opacity: 0.78;
+}
+
+.pin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.pin-btn:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-surface-hover);
+  color: var(--ink-primary);
+}
+
+.pin-btn.active {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
 }
 
 .pr-card-body {

@@ -8,11 +8,13 @@ import {
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_PR_TRIAGE_STATE,
   transitionPrDraftState,
   transitionPrLabelsState,
   transitionPrMergeState,
   transitionPrRerunState,
   transitionPrSyncState,
+  transitionPrTriageState,
 } from '@/composables/use-dashboard-state';
 import {
   ALL_REPOS_SELECTION,
@@ -860,8 +862,10 @@ describe('DashboardApp', () => {
         q: '',
         repoSelection: { mode: 'subset', repos: ['acme/web-app', 'acme/core-api'] },
         drafts: false,
+        snoozed: false,
       }),
     ).toBe('?repos=acme%2Fcore-api%2Cacme%2Fweb-app');
+    expect(parseFiltersFromSearch('?snoozed=1').snoozed).toBe(true);
 
     const snap = makeSnapshot();
     vi.stubGlobal(
@@ -2120,6 +2124,128 @@ describe('DashboardApp', () => {
     await flushPromises();
     expect(summaryFetchCount).toBe(2);
     expect(inspector.find('.check-log-pre').text()).toContain('FAIL src/retry.spec.ts');
+
+    wrapper.unmount();
+  });
+
+  it('supports pinning PRs to top, snoozing PRs out of NEEDS YOU into Inbox Zero, and revealing snoozed PRs', async () => {
+    const saving = transitionPrTriageState(IDLE_PR_TRIAGE_STATE, {
+      type: 'TRIAGE_REQUEST',
+      action: 'pin',
+    });
+    expect(saving).toEqual({ status: 'saving', action: 'pin' });
+    const failed = transitionPrTriageState(saving, {
+      type: 'TRIAGE_FAILED',
+      error: 'Disk write failed',
+    });
+    expect(failed).toEqual({ status: 'error', error: 'Disk write failed' });
+    expect(
+      transitionPrTriageState(
+        transitionPrTriageState(failed, { type: 'TRIAGE_REQUEST', action: 'snooze' }),
+        { type: 'TRIAGE_SUCCEEDED' },
+      ),
+    ).toEqual(IDLE_PR_TRIAGE_STATE);
+
+    const triageCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/triage')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        triageCalls.push({ url, body });
+        if (body.action === 'pin') {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              key: 'acme/web-app#202',
+              triage: { pinned: true, pinnedAt: '2026-11-24T12:00:00.000Z', isSnoozed: false },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        if (body.action === 'snooze') {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              key: 'acme/core-api#101',
+              triage: {
+                pinned: false,
+                isSnoozed: true,
+                snoozedAt: '2026-11-24T12:00:00.000Z',
+                snoozeCondition: body.condition,
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            key: 'acme/core-api#101',
+            triage: { pinned: false, isSnoozed: false },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      return new Response(JSON.stringify(makeSnapshot()), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"triage-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Initially #101 is first, #202 is second
+    expect(wrapper.findAll('.action-queue .pr-card-trigger')[0]!.attributes('data-pr-key')).toBe(
+      'acme/core-api#101',
+    );
+
+    // Pin #202 -> floats to index 0 with pinned badge
+    await wrapper.find('button[aria-label="Pin — acme/web-app#202"]').trigger('click');
+    await flushPromises();
+    expect(triageCalls[0]).toEqual({
+      url: '/api/pull/acme/web-app/202/triage',
+      body: { action: 'pin' },
+    });
+    expect(wrapper.findAll('.action-queue .pr-card-trigger')[0]!.attributes('data-pr-key')).toBe(
+      'acme/web-app#202',
+    );
+    expect(wrapper.find('.pr-card.pinned').text()).toContain('pinned');
+
+    // Snooze #101 (Needs You) -> hidden from queue, NEEDS YOU drops to 0 with +1 snoozed
+    const card101 = wrapper
+      .findAll('.action-queue .pr-card')
+      .find((card) => card.find('[data-pr-key="acme/core-api#101"]').exists())!;
+    await card101.find('button[aria-label="Snooze — acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    const nextPushOption = card101
+      .findAll('.snooze-picker-popover .picker-item')
+      .find((item) => item.text().includes('Until next push'));
+    expect(nextPushOption).toBeTruthy();
+    await nextPushOption!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-pr-key="acme/core-api#101"]').exists()).toBe(false);
+    const needsYouTile = wrapper.findAll('.kpi-tile')[0]!;
+    expect(needsYouTile.find('.kpi-value').text()).toBe('0');
+    expect(needsYouTile.text()).toContain('+1 snoozed');
+
+    // Click NEEDS YOU tile -> shows Inbox Zero with Show 1 snoozed action
+    await needsYouTile.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.empty-state.inbox-zero').text()).toContain('Inbox Zero');
+    const showSnoozedBtn = wrapper
+      .findAll('.empty-action-btn')
+      .find((b) => b.text().includes('Show 1 snoozed'));
+    expect(showSnoozedBtn).toBeTruthy();
+
+    // Reveal snoozed PRs -> #101 reappears with snoozed badge
+    await showSnoozedBtn!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[data-pr-key="acme/core-api#101"]').exists()).toBe(true);
+    expect(wrapper.find('.pr-card.snoozed').text()).toContain('snoozed · next push');
 
     wrapper.unmount();
   });

@@ -69,6 +69,38 @@
         </p>
       </div>
 
+      <div class="draft-callout">
+        <div class="draft-callout-row">
+          <span class="draft-callout-label">Focus</span>
+          <div class="inspector-triage-actions">
+            <button
+              type="button"
+              class="inspector-pin-btn"
+              :class="{ active: isPrPinned(pr) }"
+              :aria-pressed="isPrPinned(pr) ? 'true' : 'false'"
+              :aria-disabled="triageState.status === 'saving' ? 'true' : undefined"
+              @click="$emit('toggle-pin', pr)"
+            >
+              <CarbonIcon :name="isPrPinned(pr) ? 'pin-filled' : 'pin'" :size="13" />
+              <span>{{ isPrPinned(pr) ? 'Pinned' : 'Pin' }}</span>
+            </button>
+            <SnoozePicker
+              :pr="pr"
+              :now-ms="nowMs"
+              :triage-state="triageState"
+              @snooze="(target, condition) => $emit('snooze', target, condition)"
+              @unsnooze="$emit('unsnooze', $event)"
+            />
+          </div>
+        </div>
+        <p v-if="isPrSnoozed(pr)" class="empty-note">
+          {{ formatSnoozeBadge(pr.triage?.snoozeCondition, nowMs) }}
+        </p>
+        <p v-if="triageState.status === 'error'" class="sync-error-note" role="alert">
+          {{ triageState.error }}
+        </p>
+      </div>
+
       <div v-if="showSyncAction" class="sync-callout">
         <div class="sync-callout-row">
           <button
@@ -449,6 +481,7 @@ import DraftToggle from '@/components/DraftToggle.vue';
 import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
 import PrMarkdownBody from '@/components/PrMarkdownBody.vue';
+import SnoozePicker from '@/components/SnoozePicker.vue';
 import {
   checkSummaryKey,
   IDLE_CHECK_SUMMARY_STATE,
@@ -457,6 +490,7 @@ import {
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
+  IDLE_PR_TRIAGE_STATE,
   IDLE_REPO_LABELS_STATE,
   type CheckSummaryState,
   type InspectorState,
@@ -465,12 +499,20 @@ import {
   type PrMergeState,
   type PrRerunState,
   type PrSyncState,
+  type PrTriageState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
-import type { CheckAnnotation, MergeMethod, PrDetailCheck, PrView } from '@/types/pr';
+import type {
+  CheckAnnotation,
+  MergeMethod,
+  PrDetailCheck,
+  PrView,
+  SnoozeCondition,
+} from '@/types/pr';
 import { type CheckGroup, groupDetailChecks } from '@/utils/check-groups';
 import { formatRelativeAge } from '@/utils/format';
+import { formatSnoozeBadge, isPrPinned, isPrSnoozed } from '@/utils/triage';
 
 interface Props {
   pr: PrView | null;
@@ -484,6 +526,7 @@ interface Props {
   labelState?: PrLabelsState;
   rerunState?: PrRerunState;
   checkSummaryStates?: Record<string, CheckSummaryState>;
+  triageState?: PrTriageState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -495,6 +538,7 @@ const props = withDefaults(defineProps<Props>(), {
   labelState: () => IDLE_PR_LABELS_STATE,
   rerunState: () => IDLE_PR_RERUN_STATE,
   checkSummaryStates: () => ({}),
+  triageState: () => IDLE_PR_TRIAGE_STATE,
 });
 
 const emit = defineEmits<{
@@ -511,6 +555,9 @@ const emit = defineEmits<{
   'load-labels': [pr: PrView];
   'retry-load-labels': [pr: PrView];
   'update-labels': [pr: PrView, labels: string[]];
+  'toggle-pin': [pr: PrView];
+  snooze: [pr: PrView, condition: SnoozeCondition];
+  unsnooze: [pr: PrView];
   'open-mermaid': [source: string];
 }>();
 
@@ -845,6 +892,39 @@ async function copyLogExcerpt(checkRunId: number, text: string): Promise<void> {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.35rem;
+}
+
+.inspector-triage-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.inspector-pin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-block-size: 2rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inspector-pin-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--ink-primary);
+}
+
+.inspector-pin-btn.active {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
 }
 
 .sync-callout {

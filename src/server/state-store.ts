@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import type { SnapshotResponse } from '@/types/pr';
+import type { SnapshotResponse, SnoozeCondition } from '@/types/pr';
 
 export interface CachedMergeabilityEntry {
   headRefOid: string;
@@ -27,11 +27,21 @@ export interface CachedDraftComparisonEntry {
   behindBy: number;
 }
 
+export interface PrTriageEntry {
+  pinned?: boolean;
+  pinnedAt?: string;
+  snoozed?: {
+    condition: SnoozeCondition;
+    snoozedAt: string;
+  };
+}
+
 export interface PersistedState {
   version: 1;
   mergeability: Record<string, CachedMergeabilityEntry>;
   probeCounters: Record<string, ProbeCounterEntry>;
   draftComparisons?: Record<string, CachedDraftComparisonEntry>;
+  triage?: Record<string, PrTriageEntry>;
   lastSnapshot?: CachedSnapshotEntry;
 }
 
@@ -40,6 +50,7 @@ const EMPTY_STATE: PersistedState = {
   mergeability: {},
   probeCounters: {},
   draftComparisons: {},
+  triage: {},
 };
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.cache/state.json');
@@ -67,6 +78,7 @@ export class StateStore {
           mergeability: { ...parsed.mergeability },
           probeCounters: { ...parsed.probeCounters },
           draftComparisons: parsed.draftComparisons ? { ...parsed.draftComparisons } : {},
+          triage: parsed.triage ? { ...parsed.triage } : {},
           ...(parsed.lastSnapshot?.snapshot && typeof parsed.lastSnapshot.savedAt === 'string'
             ? { lastSnapshot: parsed.lastSnapshot }
             : {}),
@@ -82,6 +94,7 @@ export class StateStore {
       mergeability: {},
       probeCounters: {},
       draftComparisons: {},
+      triage: {},
     };
     return this.state;
   }
@@ -142,6 +155,34 @@ export class StateStore {
     await this.persist();
   }
 
+  async getTriageMap(): Promise<Record<string, PrTriageEntry>> {
+    const state = await this.load();
+    return { ...state.triage };
+  }
+
+  async getPrTriage(prKey: string): Promise<PrTriageEntry | null> {
+    const state = await this.load();
+    return state.triage?.[prKey] ?? null;
+  }
+
+  async setPrTriage(prKey: string, entry: PrTriageEntry | null): Promise<void> {
+    const state = await this.load();
+    const next = { ...state.triage };
+    if (!entry || (!entry.pinned && !entry.snoozed)) {
+      delete next[prKey];
+    } else {
+      next[prKey] = entry;
+    }
+    state.triage = next;
+    await this.persist();
+  }
+
+  async setTriageMap(triage: Record<string, PrTriageEntry>): Promise<void> {
+    const state = await this.load();
+    state.triage = { ...triage };
+    await this.persist();
+  }
+
   async getLastSnapshot(): Promise<CachedSnapshotEntry | null> {
     const state = await this.load();
     return state.lastSnapshot ?? null;
@@ -159,6 +200,7 @@ export class StateStore {
       mergeability: {},
       probeCounters: {},
       draftComparisons: {},
+      triage: {},
     };
     await this.persist();
   }
