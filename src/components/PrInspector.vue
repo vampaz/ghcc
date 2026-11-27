@@ -37,6 +37,7 @@
         :pr="activePr"
         :inspector="activeInspector"
         :now-ms="nowMs"
+        :viewer-login="viewerLogin"
         :resolved-theme="resolvedTheme"
         :sync-state="syncState"
         :draft-state="draftState"
@@ -46,6 +47,10 @@
         :rerun-state="rerunState"
         :check-summary-states="checkSummaryStates"
         :triage-state="triageState"
+        :review-submit-state="reviewSubmitState"
+        :thread-action-states="threadActionStates"
+        :repo-reviewers-state="repoReviewersState"
+        :pr-reviewers-state="prReviewersState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
@@ -55,6 +60,14 @@
         @toggle-pin="$emit('toggle-pin', $event)"
         @snooze="(target, condition) => $emit('snooze', target, condition)"
         @unsnooze="$emit('unsnooze', $event)"
+        @submit-review="(target, event, body) => $emit('submit-review', target, event, body)"
+        @reply-thread="(target, threadId, body) => $emit('reply-thread', target, threadId, body)"
+        @resolve-thread="
+          (target, threadId, resolved) => $emit('resolve-thread', target, threadId, resolved)
+        "
+        @load-reviewers="$emit('load-reviewers', $event)"
+        @retry-load-reviewers="$emit('retry-load-reviewers', $event)"
+        @update-reviewers="(target, changes) => $emit('update-reviewers', target, changes)"
         @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
         @request-merge="(target, method) => $emit('request-merge', target, method)"
         @load-labels="$emit('load-labels', $event)"
@@ -84,6 +97,7 @@
       :pr="pr"
       :inspector="inspector"
       :now-ms="nowMs"
+      :viewer-login="viewerLogin"
       :resolved-theme="resolvedTheme"
       :sync-state="syncState"
       :draft-state="draftState"
@@ -93,6 +107,10 @@
       :rerun-state="rerunState"
       :check-summary-states="checkSummaryStates"
       :triage-state="triageState"
+      :review-submit-state="reviewSubmitState"
+      :thread-action-states="threadActionStates"
+      :repo-reviewers-state="repoReviewersState"
+      :pr-reviewers-state="prReviewersState"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
@@ -102,6 +120,14 @@
       @toggle-pin="$emit('toggle-pin', $event)"
       @snooze="(target, condition) => $emit('snooze', target, condition)"
       @unsnooze="$emit('unsnooze', $event)"
+      @submit-review="(target, event, body) => $emit('submit-review', target, event, body)"
+      @reply-thread="(target, threadId, body) => $emit('reply-thread', target, threadId, body)"
+      @resolve-thread="
+        (target, threadId, resolved) => $emit('resolve-thread', target, threadId, resolved)
+      "
+      @load-reviewers="$emit('load-reviewers', $event)"
+      @retry-load-reviewers="$emit('retry-load-reviewers', $event)"
+      @update-reviewers="(target, changes) => $emit('update-reviewers', target, changes)"
       @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
       @request-merge="(target, method) => $emit('request-merge', target, method)"
       @load-labels="$emit('load-labels', $event)"
@@ -121,27 +147,35 @@ import {
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
+  IDLE_PR_REVIEW_SUBMIT_STATE,
+  IDLE_PR_REVIEWERS_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_PR_TRIAGE_STATE,
   IDLE_REPO_LABELS_STATE,
+  IDLE_REPO_REVIEWERS_STATE,
   type CheckSummaryState,
   type InspectorState,
   type PrDraftState,
   type PrLabelsState,
   type PrMergeState,
   type PrRerunState,
+  type PrReviewersState,
+  type PrReviewSubmitState,
   type PrSyncState,
   type PrTriageState,
   type RepoLabelsState,
+  type RepoReviewersState,
+  type ThreadActionState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
-import type { MergeMethod, PrView, SnoozeCondition } from '@/types/pr';
+import type { MergeMethod, PrView, ReviewEvent, SnoozeCondition } from '@/types/pr';
 
 interface Props {
   mode: 'dialog' | 'inline';
   pr: PrView | null;
   inspector: InspectorState;
   nowMs: number;
+  viewerLogin?: string;
   resolvedTheme?: ResolvedTheme;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
@@ -151,9 +185,14 @@ interface Props {
   rerunState?: PrRerunState;
   checkSummaryStates?: Record<string, CheckSummaryState>;
   triageState?: PrTriageState;
+  reviewSubmitState?: PrReviewSubmitState;
+  threadActionStates?: Record<string, ThreadActionState>;
+  repoReviewersState?: RepoReviewersState;
+  prReviewersState?: PrReviewersState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  viewerLogin: '',
   resolvedTheme: 'dark',
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
@@ -163,6 +202,10 @@ const props = withDefaults(defineProps<Props>(), {
   rerunState: () => IDLE_PR_RERUN_STATE,
   checkSummaryStates: () => ({}),
   triageState: () => IDLE_PR_TRIAGE_STATE,
+  reviewSubmitState: () => IDLE_PR_REVIEW_SUBMIT_STATE,
+  threadActionStates: () => ({}),
+  repoReviewersState: () => IDLE_REPO_REVIEWERS_STATE,
+  prReviewersState: () => IDLE_PR_REVIEWERS_STATE,
 });
 
 defineEmits<{
@@ -183,6 +226,20 @@ defineEmits<{
   'toggle-pin': [pr: PrView];
   snooze: [pr: PrView, condition: SnoozeCondition];
   unsnooze: [pr: PrView];
+  'submit-review': [pr: PrView, event: ReviewEvent, body?: string];
+  'reply-thread': [pr: PrView, threadId: string, body: string];
+  'resolve-thread': [pr: PrView, threadId: string, resolved: boolean];
+  'load-reviewers': [pr: PrView];
+  'retry-load-reviewers': [pr: PrView];
+  'update-reviewers': [
+    pr: PrView,
+    changes: {
+      addUsers?: string[];
+      removeUsers?: string[];
+      addTeams?: string[];
+      removeTeams?: string[];
+    },
+  ];
   'open-mermaid': [source: string];
 }>();
 

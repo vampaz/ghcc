@@ -16,12 +16,20 @@ import type {
   PrDetailResponse,
   PrLabel,
   PrReviewerDetail,
+  PrReviewThread,
+  PrReviewThreadComment,
   PrTimelineItem,
   RateLimitBucket,
+  RepoReviewerOption,
   RerunFailedChecksResponse,
+  ReviewEvent,
   SnapshotWarning,
+  SubmitReviewResponse,
+  ThreadReplyResponse,
+  ThreadResolveResponse,
   ToggleDraftResponse,
   UpdateBranchResponse,
+  UpdateReviewersResponse,
 } from '@/types/pr';
 
 const GITHUB_GRAPHQL_URL = 'https://api.github.com/graphql';
@@ -29,6 +37,7 @@ const GITHUB_REST_BASE = 'https://api.github.com';
 const SAFE_SEGMENT_RE = /^[\w.-]+$/;
 const SAFE_NUMBER_RE = /^[1-9]\d*$/;
 const SAFE_SHA_RE = /^[0-9a-f]{40}$/i;
+const SAFE_NODE_ID_RE = /^[A-Za-z0-9_=-]{4,120}$/;
 
 const PR_FIELDS_FRAGMENT = `
 fragment PrFields on PullRequest {
@@ -97,6 +106,12 @@ fragment PrFields on PullRequest {
           slug
         }
       }
+    }
+  }
+  reviewThreads(first: 20) {
+    totalCount
+    nodes {
+      isResolved
     }
   }
   commits(last: 1) {
@@ -236,6 +251,28 @@ query PullDetail($owner: String!, $repo: String!, $number: Int!) {
             }
             ... on Team {
               slug
+            }
+          }
+        }
+      }
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 10) {
+            nodes {
+              id
+              createdAt
+              url
+              bodyText
+              bodyHTML
+              author {
+                login
+              }
             }
           }
         }
@@ -393,6 +430,60 @@ mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
 }
 `;
 
+const ADD_THREAD_REPLY_MUTATION = `
+mutation AddPullRequestReviewThreadReply($pullRequestReviewThreadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(
+    input: { pullRequestReviewThreadId: $pullRequestReviewThreadId, body: $body }
+  ) {
+    comment {
+      id
+      createdAt
+      url
+      bodyText
+      bodyHTML
+      author {
+        login
+      }
+    }
+  }
+}
+`;
+
+const RESOLVE_THREAD_MUTATION = `
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+`;
+
+const UNRESOLVE_THREAD_MUTATION = `
+mutation UnresolveReviewThread($threadId: ID!) {
+  unresolveReviewThread(input: { threadId: $threadId }) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+`;
+
+const REPO_REVIEWERS_QUERY = `
+query RepoReviewers($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    assignableUsers(first: 100) {
+      nodes {
+        login
+        name
+      }
+    }
+  }
+}
+`;
+
 export class GitHubAuthError extends Error {
   constructor(message: string) {
     super(message);
@@ -461,6 +552,13 @@ export function validatePositiveIntId(value: unknown, label: string): number {
     throw new GitHubApiError(`Invalid ${label}`, 400);
   }
   return num;
+}
+
+export function validateNodeId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !SAFE_NODE_ID_RE.test(value.trim())) {
+    throw new GitHubApiError(`Invalid ${label}`, 400);
+  }
+  return value.trim();
 }
 
 function parseRateLimitHeaders(headers: Headers): RateLimitBucket | null {
@@ -623,6 +721,39 @@ export interface GitHubClient {
     checkRunId: number,
     options?: { isActionsJob?: boolean },
   ): Promise<CheckSummaryResponse>;
+  submitPullReview(
+    owner: string,
+    repo: string,
+    number: number,
+    event: ReviewEvent,
+    body?: string,
+  ): Promise<SubmitReviewResponse>;
+  replyToReviewThread(
+    owner: string,
+    repo: string,
+    number: number,
+    threadId: string,
+    body: string,
+  ): Promise<ThreadReplyResponse>;
+  setReviewThreadResolved(
+    owner: string,
+    repo: string,
+    number: number,
+    threadId: string,
+    resolved: boolean,
+  ): Promise<ThreadResolveResponse>;
+  fetchRepoReviewers(owner: string, repo: string): Promise<RepoReviewerOption[]>;
+  updatePullReviewers(
+    owner: string,
+    repo: string,
+    number: number,
+    changes: {
+      addUsers?: string[];
+      removeUsers?: string[];
+      addTeams?: string[];
+      removeTeams?: string[];
+    },
+  ): Promise<UpdateReviewersResponse>;
   invalidatePullDetailCache?(owner?: string, repo?: string, number?: number): void;
 }
 
@@ -957,6 +1088,11 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   const pullDetailInFlight = new Map<string, Promise<PrDetailResponse>>();
   const repoLabelsCache = new Map<string, { fetchedAtMs: number; value: PrLabel[] }>();
   const repoLabelsInFlight = new Map<string, Promise<PrLabel[]>>();
+  const repoReviewersCache = new Map<
+    string,
+    { fetchedAtMs: number; value: RepoReviewerOption[] }
+  >();
+  const repoReviewersInFlight = new Map<string, Promise<RepoReviewerOption[]>>();
   const checkSummaryCache = new Map<string, { fetchedAtMs: number; value: CheckSummaryResponse }>();
   const checkSummaryInFlight = new Map<string, Promise<CheckSummaryResponse>>();
 
@@ -1523,6 +1659,26 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
                     | null;
                 } | null>;
               };
+              reviewThreads?: {
+                nodes: Array<{
+                  id: string;
+                  isResolved: boolean;
+                  isOutdated: boolean;
+                  path: string;
+                  line: number | null;
+                  originalLine: number | null;
+                  comments: {
+                    nodes: Array<{
+                      id: string;
+                      createdAt: string;
+                      url: string | null;
+                      bodyText: string;
+                      bodyHTML?: string | null;
+                      author: { login: string } | null;
+                    } | null>;
+                  };
+                } | null>;
+              } | null;
               commits: {
                 nodes: Array<{
                   commit: {
@@ -1616,6 +1772,39 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
           }
         }
 
+        const reviewThreads: PrReviewThread[] = [];
+        for (const thread of pr.reviewThreads?.nodes ?? []) {
+          if (!thread?.id) {
+            continue;
+          }
+          const comments: PrReviewThreadComment[] = [];
+          for (const comment of thread.comments?.nodes ?? []) {
+            if (!comment?.id) {
+              continue;
+            }
+            const rawCommentText = (comment.bodyText ?? '').trim();
+            const commentExcerpt =
+              rawCommentText.length > 280 ? `${rawCommentText.slice(0, 277)}...` : rawCommentText;
+            comments.push({
+              id: comment.id,
+              author: comment.author?.login ?? 'ghost',
+              bodyExcerpt: commentExcerpt,
+              bodyHtml: sanitizePrBodyHtml(comment.bodyHTML, rawCommentText),
+              createdAt: comment.createdAt ?? '',
+              url: typeof comment.url === 'string' ? comment.url : null,
+            });
+          }
+          reviewThreads.push({
+            id: thread.id,
+            isResolved: Boolean(thread.isResolved),
+            isOutdated: Boolean(thread.isOutdated),
+            path: thread.path ?? '',
+            line: typeof thread.line === 'number' ? thread.line : null,
+            originalLine: typeof thread.originalLine === 'number' ? thread.originalLine : null,
+            comments,
+          });
+        }
+
         const rawBody = (pr.bodyText ?? '').trim();
         const bodyExcerpt = rawBody.length > 420 ? `${rawBody.slice(0, 417)}...` : rawBody;
         const bodyHtml = sanitizePrBodyHtml(pr.bodyHTML, rawBody);
@@ -1635,6 +1824,7 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
           checksTotalCount: rollup?.contexts.totalCount ?? checks.length,
           checks,
           reviewers: Array.from(reviewerMap.values()),
+          reviewThreads,
           timeline: timeline.reverse(),
           fetchedAt: new Date(now()).toISOString(),
         };
@@ -2591,6 +2781,300 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
       } finally {
         checkSummaryInFlight.delete(cacheKey);
       }
+    },
+
+    async submitPullReview(
+      owner: string,
+      repo: string,
+      number: number,
+      event: ReviewEvent,
+      body?: string,
+    ): Promise<SubmitReviewResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+      const trimmedBody = typeof body === 'string' ? body.trim() : '';
+      if (event !== 'APPROVE' && trimmedBody.length === 0) {
+        throw new GitHubApiError('A review comment body is required for this review action', 400);
+      }
+
+      const token = await deps.tokenStore.getToken();
+      let response: Response;
+      try {
+        response = await fetchFn(
+          `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}/pulls/${safeNum}/reviews`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': 'ghcc/0.1',
+            },
+            body: JSON.stringify({
+              event,
+              ...(trimmedBody.length > 0 ? { body: trimmedBody } : {}),
+            }),
+          },
+        );
+      } catch (error) {
+        throw new GitHubApiError(
+          `Network error submitting review: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      if (!response.ok) {
+        const rawText = await response.text().catch(() => '');
+        throw mapActionsError(response, rawText, token, now(), 'Submitting pull request review');
+      }
+
+      const payload = (await response.json().catch(() => ({}))) as { state?: unknown };
+      return {
+        ok: true,
+        event,
+        state: typeof payload?.state === 'string' ? payload.state : event,
+      };
+    },
+
+    async replyToReviewThread(
+      owner: string,
+      repo: string,
+      number: number,
+      threadId: string,
+      body: string,
+    ): Promise<ThreadReplyResponse> {
+      validateRepoSegment(owner, 'owner');
+      validateRepoSegment(repo, 'repo');
+      validatePullNumber(number);
+      const safeThreadId = validateNodeId(threadId, 'threadId');
+      const trimmedBody = body.trim();
+      if (!trimmedBody) {
+        throw new GitHubApiError('Reply body cannot be empty', 400);
+      }
+
+      interface ReplyData {
+        addPullRequestReviewThreadReply?: {
+          comment?: {
+            id: string;
+            createdAt: string;
+            url: string | null;
+            bodyText: string;
+            bodyHTML?: string | null;
+            author: { login: string } | null;
+          } | null;
+        } | null;
+      }
+
+      const res = await executeGraphql<ReplyData>(
+        ADD_THREAD_REPLY_MUTATION,
+        { pullRequestReviewThreadId: safeThreadId, body: trimmedBody },
+        { allowRetry: false, strictErrors: true },
+      );
+
+      const comment = res.data.addPullRequestReviewThreadReply?.comment;
+      if (!comment?.id) {
+        throw new GitHubApiError('GitHub did not return the created thread reply', 502);
+      }
+
+      const rawText = (comment.bodyText ?? trimmedBody).trim();
+      return {
+        ok: true,
+        threadId: safeThreadId,
+        comment: {
+          id: comment.id,
+          author: comment.author?.login ?? 'ghost',
+          bodyExcerpt: rawText.length > 280 ? `${rawText.slice(0, 277)}...` : rawText,
+          bodyHtml: sanitizePrBodyHtml(comment.bodyHTML, rawText),
+          createdAt: comment.createdAt ?? new Date(now()).toISOString(),
+          url: typeof comment.url === 'string' ? comment.url : null,
+        },
+      };
+    },
+
+    async setReviewThreadResolved(
+      owner: string,
+      repo: string,
+      number: number,
+      threadId: string,
+      resolved: boolean,
+    ): Promise<ThreadResolveResponse> {
+      validateRepoSegment(owner, 'owner');
+      validateRepoSegment(repo, 'repo');
+      validatePullNumber(number);
+      const safeThreadId = validateNodeId(threadId, 'threadId');
+
+      interface ResolveData {
+        resolveReviewThread?: { thread?: { id: string; isResolved: boolean } | null } | null;
+        unresolveReviewThread?: { thread?: { id: string; isResolved: boolean } | null } | null;
+      }
+
+      const mutation = resolved ? RESOLVE_THREAD_MUTATION : UNRESOLVE_THREAD_MUTATION;
+      const res = await executeGraphql<ResolveData>(
+        mutation,
+        { threadId: safeThreadId },
+        { allowRetry: false, strictErrors: true },
+      );
+
+      const thread = resolved
+        ? res.data.resolveReviewThread?.thread
+        : res.data.unresolveReviewThread?.thread;
+      if (!thread?.id) {
+        throw new GitHubApiError('GitHub did not return updated review thread state', 502);
+      }
+
+      return {
+        ok: true,
+        threadId: thread.id,
+        isResolved: Boolean(thread.isResolved),
+      };
+    },
+
+    async fetchRepoReviewers(owner: string, repo: string): Promise<RepoReviewerOption[]> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const cacheKey = `${safeOwner}/${safeRepo}`;
+      const cached = repoReviewersCache.get(cacheKey);
+      if (cached && now() - cached.fetchedAtMs < REPO_LABELS_CACHE_TTL_MS) {
+        return cached.value;
+      }
+      const existingFlight = repoReviewersInFlight.get(cacheKey);
+      if (existingFlight) {
+        return existingFlight;
+      }
+
+      const loadPromise = (async (): Promise<RepoReviewerOption[]> => {
+        interface RepoReviewersData {
+          repository?: {
+            assignableUsers?: {
+              nodes?: Array<{ login?: string | null; name?: string | null } | null>;
+            } | null;
+          } | null;
+        }
+
+        const res = await executeGraphql<RepoReviewersData>(
+          REPO_REVIEWERS_QUERY,
+          { owner: safeOwner, repo: safeRepo },
+          { strictErrors: true },
+        );
+        const nodes = res.data.repository?.assignableUsers?.nodes ?? [];
+        const options: RepoReviewerOption[] = nodes
+          .filter((item): item is { login: string; name?: string | null } =>
+            Boolean(item && typeof item.login === 'string' && item.login.trim().length > 0),
+          )
+          .map((item) => ({
+            login: item.login.trim(),
+            kind: 'user' as const,
+            name:
+              typeof item.name === 'string' && item.name.trim().length > 0
+                ? item.name.trim()
+                : null,
+          }))
+          .sort((a, b) => a.login.localeCompare(b.login, undefined, { sensitivity: 'base' }));
+
+        repoReviewersCache.set(cacheKey, { fetchedAtMs: now(), value: options });
+        return options;
+      })();
+
+      repoReviewersInFlight.set(cacheKey, loadPromise);
+      try {
+        return await loadPromise;
+      } finally {
+        repoReviewersInFlight.delete(cacheKey);
+      }
+    },
+
+    async updatePullReviewers(
+      owner: string,
+      repo: string,
+      number: number,
+      changes: {
+        addUsers?: string[];
+        removeUsers?: string[];
+        addTeams?: string[];
+        removeTeams?: string[];
+      },
+    ): Promise<UpdateReviewersResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+      const token = await deps.tokenStore.getToken();
+
+      const addUsers = (changes.addUsers ?? []).map((u) => u.trim()).filter(Boolean);
+      const removeUsers = (changes.removeUsers ?? []).map((u) => u.trim()).filter(Boolean);
+      const addTeams = (changes.addTeams ?? [])
+        .map((t) => t.trim().replace(/^@/, ''))
+        .filter(Boolean);
+      const removeTeams = (changes.removeTeams ?? [])
+        .map((t) => t.trim().replace(/^@/, ''))
+        .filter(Boolean);
+
+      const endpoint = `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}/pulls/${safeNum}/requested_reviewers`;
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'ghcc/0.1',
+      };
+
+      let latestRequestedUsers: string[] = [];
+      let latestRequestedTeams: string[] = [];
+
+      async function sendReviewerMutation(
+        method: 'POST' | 'DELETE',
+        reviewers: string[],
+        teamReviewers: string[],
+      ): Promise<void> {
+        let response: Response;
+        try {
+          response = await fetchFn(endpoint, {
+            method,
+            headers,
+            body: JSON.stringify({
+              ...(reviewers.length > 0 ? { reviewers } : {}),
+              ...(teamReviewers.length > 0 ? { team_reviewers: teamReviewers } : {}),
+            }),
+          });
+        } catch (error) {
+          throw new GitHubApiError(
+            `Network error updating reviewers: ${sanitizeErrorMessage(error, token)}`,
+            502,
+          );
+        }
+        if (!response.ok) {
+          const rawText = await response.text().catch(() => '');
+          throw mapActionsError(response, rawText, token, now(), 'Updating requested reviewers');
+        }
+        const payload = (await response.json().catch(() => ({}))) as {
+          requested_reviewers?: Array<{ login?: unknown }>;
+          requested_teams?: Array<{ slug?: unknown }>;
+        };
+        if (Array.isArray(payload?.requested_reviewers)) {
+          latestRequestedUsers = payload.requested_reviewers
+            .map((r) => (typeof r?.login === 'string' ? r.login : ''))
+            .filter(Boolean);
+        }
+        if (Array.isArray(payload?.requested_teams)) {
+          latestRequestedTeams = payload.requested_teams
+            .map((t) => (typeof t?.slug === 'string' ? t.slug : ''))
+            .filter(Boolean);
+        }
+      }
+
+      if (addUsers.length > 0 || addTeams.length > 0) {
+        await sendReviewerMutation('POST', addUsers, addTeams);
+      }
+      if (removeUsers.length > 0 || removeTeams.length > 0) {
+        await sendReviewerMutation('DELETE', removeUsers, removeTeams);
+      }
+
+      return {
+        ok: true,
+        requestedUsers: latestRequestedUsers,
+        requestedTeams: latestRequestedTeams,
+      };
     },
   };
 }

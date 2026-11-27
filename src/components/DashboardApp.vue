@@ -103,6 +103,7 @@
               :pr="pr"
               :inspector="inspector"
               :now-ms="nowMs"
+              :viewer-login="snapshot?.viewer.login"
               :resolved-theme="resolvedTheme"
               :sync-state="syncStates[pr.key]"
               :draft-state="draftStates[pr.key]"
@@ -112,6 +113,10 @@
               :rerun-state="rerunStates[pr.key]"
               :check-summary-states="checkSummaryStates"
               :triage-state="triageStates[pr.key]"
+              :review-submit-state="reviewSubmitStates[pr.key]"
+              :thread-action-states="threadActionStates"
+              :repo-reviewers-state="repoReviewersStates[pr.repository]"
+              :pr-reviewers-state="prReviewersStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
@@ -120,6 +125,12 @@
               @toggle-pin="onTogglePin"
               @snooze="onSnoozePr"
               @unsnooze="onUnsnoozePr"
+              @submit-review="submitPullReview"
+              @reply-thread="replyToPullThread"
+              @resolve-thread="togglePullThreadResolved"
+              @load-reviewers="onLoadReviewers"
+              @retry-load-reviewers="onRetryLoadReviewers"
+              @update-reviewers="updatePullReviewers"
               @toggle-draft="togglePullDraft"
               @request-merge="openMergeConfirm"
               @load-labels="onLoadLabels"
@@ -150,6 +161,7 @@
                 :pr="pr"
                 :inspector="inspector"
                 :now-ms="nowMs"
+                :viewer-login="snapshot?.viewer.login"
                 :resolved-theme="resolvedTheme"
                 :sync-state="syncStates[pr.key]"
                 :draft-state="draftStates[pr.key]"
@@ -159,6 +171,10 @@
                 :rerun-state="rerunStates[pr.key]"
                 :check-summary-states="checkSummaryStates"
                 :triage-state="triageStates[pr.key]"
+                :review-submit-state="reviewSubmitStates[pr.key]"
+                :thread-action-states="threadActionStates"
+                :repo-reviewers-state="repoReviewersStates[pr.repository]"
+                :pr-reviewers-state="prReviewersStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
@@ -167,6 +183,12 @@
                 @toggle-pin="onTogglePin"
                 @snooze="onSnoozePr"
                 @unsnooze="onUnsnoozePr"
+                @submit-review="submitPullReview"
+                @reply-thread="replyToPullThread"
+                @resolve-thread="togglePullThreadResolved"
+                @load-reviewers="onLoadReviewers"
+                @retry-load-reviewers="onRetryLoadReviewers"
+                @update-reviewers="updatePullReviewers"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -194,6 +216,7 @@
                 :pr="pr"
                 :inspector="inspector"
                 :now-ms="nowMs"
+                :viewer-login="snapshot?.viewer.login"
                 :resolved-theme="resolvedTheme"
                 :sync-state="syncStates[pr.key]"
                 :draft-state="draftStates[pr.key]"
@@ -203,6 +226,10 @@
                 :rerun-state="rerunStates[pr.key]"
                 :check-summary-states="checkSummaryStates"
                 :triage-state="triageStates[pr.key]"
+                :review-submit-state="reviewSubmitStates[pr.key]"
+                :thread-action-states="threadActionStates"
+                :repo-reviewers-state="repoReviewersStates[pr.repository]"
+                :pr-reviewers-state="prReviewersStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
@@ -211,6 +238,12 @@
                 @toggle-pin="onTogglePin"
                 @snooze="onSnoozePr"
                 @unsnooze="onUnsnoozePr"
+                @submit-review="submitPullReview"
+                @reply-thread="replyToPullThread"
+                @resolve-thread="togglePullThreadResolved"
+                @load-reviewers="onLoadReviewers"
+                @retry-load-reviewers="onRetryLoadReviewers"
+                @update-reviewers="updatePullReviewers"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -248,6 +281,7 @@
       :pr="selectedPr"
       :inspector="inspector"
       :now-ms="nowMs"
+      :viewer-login="snapshot?.viewer.login"
       :resolved-theme="resolvedTheme"
       :sync-state="selectedPr ? syncStates[selectedPr.key] : undefined"
       :draft-state="selectedPr ? draftStates[selectedPr.key] : undefined"
@@ -257,6 +291,10 @@
       :rerun-state="selectedPr ? rerunStates[selectedPr.key] : undefined"
       :check-summary-states="checkSummaryStates"
       :triage-state="selectedPr ? triageStates[selectedPr.key] : undefined"
+      :review-submit-state="selectedPr ? reviewSubmitStates[selectedPr.key] : undefined"
+      :thread-action-states="threadActionStates"
+      :repo-reviewers-state="selectedPr ? repoReviewersStates[selectedPr.repository] : undefined"
+      :pr-reviewers-state="selectedPr ? prReviewersStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
@@ -265,6 +303,12 @@
       @toggle-pin="onTogglePin"
       @snooze="onSnoozePr"
       @unsnooze="onUnsnoozePr"
+      @submit-review="submitPullReview"
+      @reply-thread="replyToPullThread"
+      @resolve-thread="togglePullThreadResolved"
+      @load-reviewers="onLoadReviewers"
+      @retry-load-reviewers="onRetryLoadReviewers"
+      @update-reviewers="updatePullReviewers"
       @toggle-draft="togglePullDraft"
       @request-merge="openMergeConfirm"
       @load-labels="onLoadLabels"
@@ -348,11 +392,20 @@ const {
   rerunStates,
   checkSummaryStates,
   triageStates,
+  reviewSubmitStates,
+  threadActionStates,
+  repoReviewersStates,
+  prReviewersStates,
   fetchSnapshot,
   syncPullRequest,
   rerunPullChecks,
   loadCheckSummary,
   updatePullTriage,
+  submitPullReview,
+  replyToPullThread,
+  togglePullThreadResolved,
+  loadRepoReviewers,
+  updatePullReviewers,
   togglePullDraft,
   mergePullRequest,
   loadRepoLabels,
@@ -380,6 +433,14 @@ function onSnoozePr(pr: PrView, condition: SnoozeCondition): void {
 
 function onUnsnoozePr(pr: PrView): void {
   void updatePullTriage(pr, 'unsnooze');
+}
+
+function onLoadReviewers(pr: PrView): void {
+  void loadRepoReviewers(pr.owner, pr.repo, false);
+}
+
+function onRetryLoadReviewers(pr: PrView): void {
+  void loadRepoReviewers(pr.owner, pr.repo, true);
 }
 
 const mergeConfirm = ref<MergeConfirmState>({ status: 'closed' });
@@ -582,7 +643,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .snooze-picker-popover, .refresh-btn';
+  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .snooze-picker-popover, .reviewer-picker-popover, .refresh-btn';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {

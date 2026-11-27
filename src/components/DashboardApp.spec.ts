@@ -7,12 +7,14 @@ import {
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
+  IDLE_PR_REVIEW_SUBMIT_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_PR_TRIAGE_STATE,
   transitionPrDraftState,
   transitionPrLabelsState,
   transitionPrMergeState,
   transitionPrRerunState,
+  transitionPrReviewSubmitState,
   transitionPrSyncState,
   transitionPrTriageState,
 } from '@/composables/use-dashboard-state';
@@ -2246,6 +2248,171 @@ describe('DashboardApp', () => {
     await flushPromises();
     expect(wrapper.find('[data-pr-key="acme/core-api#101"]').exists()).toBe(true);
     expect(wrapper.find('.pr-card.snoozed').text()).toContain('snoozed · next push');
+
+    wrapper.unmount();
+  });
+
+  it('supports unresolved thread badges, inline reply/resolve, and two-step quick review in inspector', async () => {
+    const submitting = transitionPrReviewSubmitState(IDLE_PR_REVIEW_SUBMIT_STATE, {
+      type: 'SUBMIT_REQUEST',
+      event: 'APPROVE',
+    });
+    expect(submitting).toEqual({ status: 'submitting', event: 'APPROVE' });
+    const submitted = transitionPrReviewSubmitState(submitting, {
+      type: 'SUBMIT_SUCCEEDED',
+      event: 'APPROVE',
+      message: 'Approved pull request.',
+    });
+    expect(submitted).toEqual({
+      status: 'submitted',
+      event: 'APPROVE',
+      message: 'Approved pull request.',
+    });
+
+    const reviewPosts: Array<Record<string, unknown>> = [];
+    const replyPosts: Array<Record<string, unknown>> = [];
+    const resolvePosts: Array<Record<string, unknown>> = [];
+
+    const teammatePr = makePrView({
+      key: 'acme/web-app#505',
+      repo: 'web-app',
+      repository: 'acme/web-app',
+      number: 505,
+      title: 'feat: teammate review target',
+      author: 'ana',
+      sources: ['review-requested'],
+      bucket: 'needs-me',
+      myAction: 'review',
+      unresolvedThreadCount: 1,
+    });
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+
+      if (url === '/api/pull/acme/web-app/505/review') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        reviewPosts.push(body);
+        return new Response(JSON.stringify({ ok: true, event: body.event, state: 'APPROVED' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      if (url === '/api/pull/acme/web-app/505/threads/PRRT_1/reply') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        replyPosts.push(body);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            threadId: 'PRRT_1',
+            comment: {
+              id: 'PRRC_2',
+              author: 'vampaz',
+              bodyExcerpt: String(body.body),
+              bodyHtml: `<p>${String(body.body)}</p>`,
+              createdAt: '2026-11-24T12:00:00.000Z',
+              url: null,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      if (url === '/api/pull/acme/web-app/505/threads/PRRT_1/resolve') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        resolvePosts.push(body);
+        return new Response(
+          JSON.stringify({ ok: true, threadId: 'PRRT_1', isResolved: Boolean(body.resolved) }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      if (url === '/api/pull/acme/web-app/505') {
+        const detail: PrDetailResponse = {
+          ...makeDetail(),
+          key: 'acme/web-app#505',
+          repo: 'web-app',
+          number: 505,
+          title: teammatePr.title,
+          reviewThreads: [
+            {
+              id: 'PRRT_1',
+              isResolved: false,
+              isOutdated: false,
+              path: 'src/auth.ts',
+              line: 42,
+              originalLine: 42,
+              comments: [
+                {
+                  id: 'PRRC_1',
+                  author: 'leo',
+                  bodyExcerpt: 'Should we validate expiry here?',
+                  bodyHtml: '<p>Should we validate expiry here?</p>',
+                  createdAt: '2026-11-24T10:00:00.000Z',
+                  url: 'https://github.com/acme/web-app/pull/505#discussion_r1',
+                },
+              ],
+            },
+          ],
+        };
+        return new Response(JSON.stringify(detail), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      if (url === '/api/pull/acme/core-api/101') {
+        return new Response(JSON.stringify(makeDetail()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      const base = makeSnapshot();
+      return new Response(
+        JSON.stringify({ ...base, pullRequests: [teammatePr, ...base.pullRequests] }),
+        { status: 200, headers: { 'content-type': 'application/json', etag: '"rev-1"' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Card shows "1 unresolved" badge
+    const card505 = wrapper.find('[data-pr-key="acme/web-app#505"]');
+    expect(card505.text()).toContain('1 unresolved');
+
+    // Own PR #101 hides Approve / Request changes, keeps Comment
+    await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    const inspector = wrapper.find('.inspector-dialog');
+    expect(inspector.find('.qr-approve-btn').exists()).toBe(false);
+    expect(inspector.find('.qr-changes-btn').exists()).toBe(false);
+    expect(inspector.find('.quick-review-triggers').text()).toContain('Comment');
+
+    // Open teammate PR #505 -> Approve uses inline two-step confirmation
+    await card505.trigger('click');
+    await flushPromises();
+    await inspector.find('.qr-approve-btn').trigger('click');
+    expect(reviewPosts).toHaveLength(0);
+    await inspector.find('.qr-submit-approve').trigger('click');
+    await flushPromises();
+    expect(reviewPosts).toEqual([{ event: 'APPROVE' }]);
+
+    // Reply and resolve thread PRRT_1
+    const replyBtn = inspector.findAll('.thread-action-btn').find((b) => b.text() === 'Reply')!;
+    await replyBtn.trigger('click');
+    await inspector.find('#reply-PRRT_1').setValue('Good catch, handled.');
+    await inspector.find('.thread-reply-form .qr-submit-btn').trigger('click');
+    await flushPromises();
+    expect(replyPosts).toEqual([{ body: 'Good catch, handled.' }]);
+
+    const resolveBtn = inspector.findAll('.thread-action-btn').find((b) => b.text() === 'Resolve')!;
+    await resolveBtn.trigger('click');
+    await flushPromises();
+    expect(resolvePosts).toEqual([{ resolved: true }]);
+    expect(card505.text()).not.toContain('1 unresolved');
 
     wrapper.unmount();
   });

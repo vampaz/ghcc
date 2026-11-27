@@ -105,6 +105,10 @@ export interface RawPullRequest {
   reviewRequests: {
     nodes: Array<RawReviewRequestNode | null>;
   };
+  reviewThreads?: {
+    totalCount: number;
+    nodes: Array<{ isResolved: boolean } | null>;
+  } | null;
   commits: {
     nodes: Array<{
       commit: {

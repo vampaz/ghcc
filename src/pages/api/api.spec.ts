@@ -11,10 +11,15 @@ import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number
 import { POST as postPullLabels } from '@/pages/api/pull/[owner]/[repo]/[number]/labels';
 import { POST as postMergePull } from '@/pages/api/pull/[owner]/[repo]/[number]/merge';
 import { POST as postRerunFailed } from '@/pages/api/pull/[owner]/[repo]/[number]/rerun-failed';
+import { POST as postReview } from '@/pages/api/pull/[owner]/[repo]/[number]/review';
+import { POST as postReviewers } from '@/pages/api/pull/[owner]/[repo]/[number]/reviewers';
+import { POST as postThreadReply } from '@/pages/api/pull/[owner]/[repo]/[number]/threads/[threadId]/reply';
+import { POST as postThreadResolve } from '@/pages/api/pull/[owner]/[repo]/[number]/threads/[threadId]/resolve';
 import { POST as postTriage } from '@/pages/api/pull/[owner]/[repo]/[number]/triage';
 import { POST as postUpdateBranch } from '@/pages/api/pull/[owner]/[repo]/[number]/update-branch';
 import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
 import { GET as getRepoLabels } from '@/pages/api/repo/[owner]/[repo]/labels';
+import { GET as getRepoReviewers } from '@/pages/api/repo/[owner]/[repo]/reviewers';
 import { GET as getSnapshot } from '@/pages/api/snapshot';
 import type { TokenStore } from '@/server/auth';
 import {
@@ -1997,5 +2002,179 @@ describe('API routes (mocked fetch)', () => {
         snoozeCondition: { kind: 'until-push' },
       },
     });
+  });
+
+  it('supports quick review submission, thread reply/resolve, and repo reviewer management', async () => {
+    let repoReviewersFetches = 0;
+    const requestedMethods: string[] = [];
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+
+      if (
+        url === 'https://api.github.com/repos/acme/core-api/pulls/42/reviews' &&
+        method === 'POST'
+      ) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { event?: string };
+        return jsonResponse({ id: 1, state: body.event === 'APPROVE' ? 'APPROVED' : 'COMMENTED' });
+      }
+
+      if (url === 'https://api.github.com/repos/acme/core-api/pulls/42/requested_reviewers') {
+        requestedMethods.push(method);
+        return jsonResponse({
+          requested_reviewers: method === 'POST' ? [{ login: 'ana' }] : [],
+          requested_teams: [],
+        });
+      }
+
+      if (url === 'https://api.github.com/graphql') {
+        const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+        if (parsed.query?.includes('AddPullRequestReviewThreadReply')) {
+          return jsonResponse({
+            data: {
+              addPullRequestReviewThreadReply: {
+                comment: {
+                  id: 'PRRC_reply1',
+                  createdAt: '2026-11-24T12:00:00.000Z',
+                  url: 'https://github.com/acme/core-api/pull/42#discussion_r1',
+                  bodyText: 'Fixed in latest push',
+                  bodyHTML: '<p>Fixed in latest push</p><script>alert(1)</script>',
+                  author: { login: VIEWER_LOGIN },
+                },
+              },
+            },
+          });
+        }
+        if (parsed.query?.includes('ResolveReviewThread')) {
+          return jsonResponse({
+            data: { resolveReviewThread: { thread: { id: 'PRRT_thread1', isResolved: true } } },
+          });
+        }
+        if (parsed.query?.includes('RepoReviewers')) {
+          repoReviewersFetches++;
+          return jsonResponse({
+            data: {
+              repository: {
+                assignableUsers: {
+                  nodes: [
+                    { login: 'leo', name: 'Leo' },
+                    { login: 'ana', name: 'Ana' },
+                  ],
+                },
+              },
+            },
+          });
+        }
+      }
+
+      return jsonResponse({ message: 'Not found' }, 404);
+    });
+
+    await setupRuntime(fetchFn);
+    const sameOriginHeaders = {
+      'sec-fetch-site': 'same-origin',
+      origin: 'http://127.0.0.1:4321',
+      host: '127.0.0.1:4321',
+      'content-type': 'application/json',
+    };
+
+    // REQUEST_CHANGES without body -> 400
+    const missingBody = await postReview(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/review', {
+          method: 'POST',
+          headers: sameOriginHeaders,
+          body: JSON.stringify({ event: 'REQUEST_CHANGES', body: '   ' }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(missingBody.status).toBe(400);
+
+    // APPROVE without body -> 200
+    const approveRes = await postReview(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/review', {
+          method: 'POST',
+          headers: sameOriginHeaders,
+          body: JSON.stringify({ event: 'APPROVE' }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(approveRes.status).toBe(200);
+    expect(await approveRes.json()).toEqual({ ok: true, event: 'APPROVE', state: 'APPROVED' });
+
+    // Thread reply sanitizes returned HTML
+    const replyRes = await postThreadReply(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/threads/PRRT_thread1/reply', {
+          method: 'POST',
+          headers: sameOriginHeaders,
+          body: JSON.stringify({ body: 'Fixed in latest push' }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42', threadId: 'PRRT_thread1' },
+      ),
+    );
+    expect(replyRes.status).toBe(200);
+    const replyBody = (await replyRes.json()) as {
+      ok: boolean;
+      comment: { bodyHtml: string; author: string };
+    };
+    expect(replyBody.ok).toBe(true);
+    expect(replyBody.comment.bodyHtml).not.toContain('<script>');
+
+    // Resolve thread
+    const resolveRes = await postThreadResolve(
+      makeApiContext(
+        new Request(
+          'http://127.0.0.1:4321/api/pull/acme/core-api/42/threads/PRRT_thread1/resolve',
+          {
+            method: 'POST',
+            headers: sameOriginHeaders,
+            body: JSON.stringify({ resolved: true }),
+          },
+        ),
+        { owner: 'acme', repo: 'core-api', number: '42', threadId: 'PRRT_thread1' },
+      ),
+    );
+    expect(resolveRes.status).toBe(200);
+    expect(await resolveRes.json()).toEqual({
+      ok: true,
+      threadId: 'PRRT_thread1',
+      isResolved: true,
+    });
+
+    // Repo reviewers are cached and sorted
+    const revList1 = await getRepoReviewers(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/repo/acme/core-api/reviewers'), {
+        owner: 'acme',
+        repo: 'core-api',
+      }),
+    );
+    await getRepoReviewers(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/repo/acme/core-api/reviewers'), {
+        owner: 'acme',
+        repo: 'core-api',
+      }),
+    );
+    expect(repoReviewersFetches).toBe(1);
+    const revBody = (await revList1.json()) as { reviewers: Array<{ login: string }> };
+    expect(revBody.reviewers.map((r) => r.login)).toEqual(['ana', 'leo']);
+
+    // Add and remove reviewers
+    const updateRevRes = await postReviewers(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/reviewers', {
+          method: 'POST',
+          headers: sameOriginHeaders,
+          body: JSON.stringify({ addUsers: ['ana'], removeUsers: ['leo'] }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(updateRevRes.status).toBe(200);
+    expect(requestedMethods).toEqual(['POST', 'DELETE']);
   });
 });

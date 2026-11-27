@@ -105,6 +105,7 @@ export interface PrView {
   ageDays: number;
   idleDays: number;
   blockerSummary: string;
+  unresolvedThreadCount?: number;
   triage?: PrTriageInfo;
 }
 
@@ -195,6 +196,25 @@ export interface PrReviewerDetail {
   asCodeOwner: boolean;
 }
 
+export interface PrReviewThreadComment {
+  id: string;
+  author: string;
+  bodyExcerpt: string;
+  bodyHtml: string;
+  createdAt: string;
+  url: string | null;
+}
+
+export interface PrReviewThread {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path: string;
+  line: number | null;
+  originalLine: number | null;
+  comments: PrReviewThreadComment[];
+}
+
 export interface PrDetailResponse {
   key: string;
   owner: string;
@@ -210,6 +230,7 @@ export interface PrDetailResponse {
   checksTotalCount: number;
   checks: PrDetailCheck[];
   reviewers: PrReviewerDetail[];
+  reviewThreads?: PrReviewThread[];
   timeline: PrTimelineItem[];
   fetchedAt: string;
 }
@@ -286,4 +307,41 @@ export interface UpdateTriageResponse {
   ok: true;
   key: string;
   triage: PrTriageInfo;
+}
+
+export type ReviewEvent = 'APPROVE' | 'COMMENT' | 'REQUEST_CHANGES';
+
+export interface SubmitReviewResponse {
+  ok: true;
+  event: ReviewEvent;
+  state: string;
+}
+
+export interface ThreadReplyResponse {
+  ok: true;
+  threadId: string;
+  comment: PrReviewThreadComment;
+}
+
+export interface ThreadResolveResponse {
+  ok: true;
+  threadId: string;
+  isResolved: boolean;
+}
+
+export interface RepoReviewerOption {
+  login: string;
+  kind: 'user' | 'team';
+  name: string | null;
+}
+
+export interface RepoReviewersResponse {
+  repository: string;
+  reviewers: RepoReviewerOption[];
+}
+
+export interface UpdateReviewersResponse {
+  ok: true;
+  requestedUsers: string[];
+  requestedTeams: string[];
 }

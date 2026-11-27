@@ -338,6 +338,10 @@ export async function normalizePullRequests(
       viewerLogin: options.viewerLogin,
     });
 
+    const unresolvedThreadCount = (raw.reviewThreads?.nodes ?? []).filter(
+      (node) => node !== null && node.isResolved === false,
+    ).length;
+
     views.push({
       key,
       owner,
@@ -373,6 +377,7 @@ export async function normalizePullRequests(
       ageDays,
       idleDays,
       blockerSummary,
+      unresolvedThreadCount,
     });
   }
 

@@ -435,10 +435,25 @@
       </section>
 
       <section class="detail-section" aria-label="Reviewers">
-        <h2 class="detail-heading">
-          Reviewers
-          <span class="mono-num detail-count">{{ inspector.detail.reviewers.length }}</span>
-        </h2>
+        <div class="detail-heading-row">
+          <h2 class="detail-heading">
+            Reviewers
+            <span class="mono-num detail-count">{{ inspector.detail.reviewers.length }}</span>
+          </h2>
+          <ReviewerPicker
+            v-if="pr"
+            :pr="pr"
+            :current-reviewers="inspector.detail.reviewers"
+            :repo-reviewers-state="repoReviewersState"
+            :pr-reviewers-state="prReviewersState"
+            @load-reviewers="$emit('load-reviewers', $event)"
+            @retry-load="$emit('retry-load-reviewers', $event)"
+            @update-reviewers="(target, changes) => $emit('update-reviewers', target, changes)"
+          />
+        </div>
+        <p v-if="prReviewersState.status === 'error'" class="sync-error-note" role="alert">
+          {{ prReviewersState.error }}
+        </p>
         <p v-if="inspector.detail.reviewers.length === 0" class="empty-note">No reviewers yet.</p>
         <ul v-else role="list" class="detail-list">
           <li
@@ -451,6 +466,252 @@
               {{ rev.kind === 'team' ? rev.login : `@${rev.login}` }}
               <span v-if="rev.asCodeOwner" class="codeowner-note">code owner</span>
             </span>
+          </li>
+        </ul>
+
+        <div v-if="pr" class="quick-review-box">
+          <div class="quick-review-head">
+            <span class="draft-callout-label">Quick review</span>
+            <div class="quick-review-triggers">
+              <button
+                v-if="!isOwnPr"
+                type="button"
+                class="qr-btn qr-approve-btn"
+                :class="{ active: quickReview.status === 'confirm-approve' }"
+                :aria-disabled="reviewSubmitState.status === 'submitting' ? 'true' : undefined"
+                @click="startQuickApprove"
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                class="qr-btn"
+                :class="{
+                  active: quickReview.status === 'compose' && quickReview.event === 'COMMENT',
+                }"
+                :aria-disabled="reviewSubmitState.status === 'submitting' ? 'true' : undefined"
+                @click="startQuickCompose('COMMENT')"
+              >
+                Comment
+              </button>
+              <button
+                v-if="!isOwnPr"
+                type="button"
+                class="qr-btn qr-changes-btn"
+                :class="{
+                  active:
+                    quickReview.status === 'compose' && quickReview.event === 'REQUEST_CHANGES',
+                }"
+                :aria-disabled="reviewSubmitState.status === 'submitting' ? 'true' : undefined"
+                @click="startQuickCompose('REQUEST_CHANGES')"
+              >
+                Request changes
+              </button>
+            </div>
+          </div>
+
+          <div v-if="quickReview.status === 'confirm-approve'" class="quick-review-form">
+            <label :for="reviewTextareaId" class="visually-hidden">Optional approval note</label>
+            <textarea
+              :id="reviewTextareaId"
+              v-model="quickReview.body"
+              rows="2"
+              class="quick-review-textarea"
+              placeholder="Optional approval comment..."
+            ></textarea>
+            <div class="quick-review-form-actions">
+              <button
+                type="button"
+                class="qr-submit-btn qr-submit-approve"
+                :disabled="reviewSubmitState.status === 'submitting'"
+                @click="submitQuickReview('APPROVE', quickReview.body)"
+              >
+                {{
+                  reviewSubmitState.status === 'submitting' ? 'Submitting...' : 'Confirm approval'
+                }}
+              </button>
+              <button type="button" class="qr-cancel-btn" @click="cancelQuickReview">Cancel</button>
+            </div>
+          </div>
+
+          <div v-else-if="quickReview.status === 'compose'" class="quick-review-form">
+            <label :for="reviewTextareaId" class="visually-hidden">Review comment</label>
+            <textarea
+              :id="reviewTextareaId"
+              v-model="quickReview.body"
+              rows="3"
+              class="quick-review-textarea"
+              :placeholder="
+                quickReview.event === 'REQUEST_CHANGES'
+                  ? 'Describe requested changes (required)...'
+                  : 'Write a review comment (required)...'
+              "
+            ></textarea>
+            <div class="quick-review-form-actions">
+              <button
+                type="button"
+                class="qr-submit-btn"
+                :class="{ 'qr-submit-changes': quickReview.event === 'REQUEST_CHANGES' }"
+                :disabled="
+                  reviewSubmitState.status === 'submitting' || quickReview.body.trim().length === 0
+                "
+                @click="submitQuickReview(quickReview.event, quickReview.body)"
+              >
+                {{
+                  reviewSubmitState.status === 'submitting'
+                    ? 'Submitting...'
+                    : quickReview.event === 'REQUEST_CHANGES'
+                      ? 'Submit changes requested'
+                      : 'Post comment'
+                }}
+              </button>
+              <button type="button" class="qr-cancel-btn" @click="cancelQuickReview">Cancel</button>
+            </div>
+          </div>
+
+          <p
+            v-if="reviewSubmitState.status === 'submitted'"
+            class="rerun-status-note"
+            role="status"
+          >
+            {{ reviewSubmitState.message }}
+          </p>
+          <p v-if="reviewSubmitState.status === 'error'" class="sync-error-note" role="alert">
+            {{ reviewSubmitState.error }}
+          </p>
+        </div>
+      </section>
+
+      <section
+        v-if="allReviewThreads.length > 0"
+        class="detail-section"
+        aria-label="Review threads"
+      >
+        <div class="detail-heading-row">
+          <h2 class="detail-heading">
+            Review Threads
+            <span class="mono-num detail-count"> {{ unresolvedThreads.length }} unresolved </span>
+          </h2>
+          <button
+            v-if="resolvedThreadCount > 0"
+            type="button"
+            class="checks-toggle-all-btn"
+            :aria-pressed="showResolvedThreads ? 'true' : 'false'"
+            @click="showResolvedThreads = !showResolvedThreads"
+          >
+            {{ showResolvedThreads ? 'Hide resolved' : `Show resolved (${resolvedThreadCount})` }}
+          </button>
+        </div>
+
+        <p v-if="visibleReviewThreads.length === 0" class="empty-note">
+          All review threads are resolved.
+        </p>
+
+        <ul v-else role="list" class="thread-list">
+          <li
+            v-for="thread in visibleReviewThreads"
+            :key="thread.id"
+            class="thread-card"
+            :class="{ resolved: thread.isResolved }"
+          >
+            <div class="thread-head">
+              <span class="thread-path mono-num">{{ formatThreadLocation(thread) }}</span>
+              <span class="thread-badges">
+                <span v-if="thread.isOutdated" class="thread-tag">outdated</span>
+                <span v-if="thread.isResolved" class="thread-tag resolved-tag">resolved</span>
+              </span>
+              <div class="thread-head-actions">
+                <button
+                  v-if="pr"
+                  type="button"
+                  class="thread-action-btn"
+                  @click="toggleReplyBox(thread.id)"
+                >
+                  Reply
+                </button>
+                <button
+                  v-if="pr"
+                  type="button"
+                  class="thread-action-btn"
+                  :disabled="isThreadBusy(thread.id)"
+                  @click="onToggleThreadResolved(thread)"
+                >
+                  {{
+                    getThreadState(thread.id).status === 'resolving'
+                      ? 'Saving...'
+                      : thread.isResolved
+                        ? 'Unresolve'
+                        : 'Resolve'
+                  }}
+                </button>
+              </div>
+            </div>
+
+            <div class="thread-comments">
+              <div v-for="comment in thread.comments" :key="comment.id" class="thread-comment">
+                <div class="thread-comment-meta">
+                  <span class="timeline-actor">@{{ comment.author }}</span>
+                  <span class="timeline-age mono-num">{{
+                    formatRelativeAge(comment.createdAt, nowMs)
+                  }}</span>
+                  <a
+                    v-if="comment.url"
+                    :href="comment.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="detail-link"
+                  >
+                    <span>GitHub</span>
+                    <CarbonIcon name="launch" :size="11" />
+                  </a>
+                </div>
+                <PrMarkdownBody
+                  v-if="comment.bodyHtml"
+                  :html="comment.bodyHtml"
+                  :pr-url="comment.url ?? pr?.url ?? inspector.detail.url"
+                  :pr-key="pr?.key ?? inspector.detail.key"
+                  :resolved-theme="resolvedTheme"
+                  @open-mermaid="$emit('open-mermaid', $event)"
+                />
+                <p v-else class="body-excerpt">{{ comment.bodyExcerpt }}</p>
+              </div>
+            </div>
+
+            <div v-if="pr && openReplyThreadId === thread.id" class="thread-reply-form">
+              <label :for="`reply-${thread.id}`" class="visually-hidden">Reply to thread</label>
+              <textarea
+                :id="`reply-${thread.id}`"
+                v-model="replyDrafts[thread.id]"
+                rows="2"
+                class="quick-review-textarea"
+                placeholder="Write a reply..."
+              ></textarea>
+              <div class="quick-review-form-actions">
+                <button
+                  type="button"
+                  class="qr-submit-btn"
+                  :disabled="
+                    isThreadBusy(thread.id) || !(replyDrafts[thread.id] ?? '').trim().length
+                  "
+                  @click="submitThreadReply(thread.id)"
+                >
+                  {{
+                    getThreadState(thread.id).status === 'replying' ? 'Sending...' : 'Send reply'
+                  }}
+                </button>
+                <button type="button" class="qr-cancel-btn" @click="openReplyThreadId = null">
+                  Cancel
+                </button>
+              </div>
+            </div>
+
+            <p
+              v-if="getThreadState(thread.id).status === 'error'"
+              class="sync-error-note"
+              role="alert"
+            >
+              {{ (getThreadState(thread.id) as { status: 'error'; error: string }).error }}
+            </p>
           </li>
         </ul>
       </section>
@@ -481,6 +742,7 @@ import DraftToggle from '@/components/DraftToggle.vue';
 import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
 import PrMarkdownBody from '@/components/PrMarkdownBody.vue';
+import ReviewerPicker from '@/components/ReviewerPicker.vue';
 import SnoozePicker from '@/components/SnoozePicker.vue';
 import {
   checkSummaryKey,
@@ -489,25 +751,35 @@ import {
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
+  IDLE_PR_REVIEW_SUBMIT_STATE,
+  IDLE_PR_REVIEWERS_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_PR_TRIAGE_STATE,
   IDLE_REPO_LABELS_STATE,
+  IDLE_REPO_REVIEWERS_STATE,
+  IDLE_THREAD_ACTION_STATE,
   type CheckSummaryState,
   type InspectorState,
   type PrDraftState,
   type PrLabelsState,
   type PrMergeState,
   type PrRerunState,
+  type PrReviewersState,
+  type PrReviewSubmitState,
   type PrSyncState,
   type PrTriageState,
   type RepoLabelsState,
+  type RepoReviewersState,
+  type ThreadActionState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
 import type {
   CheckAnnotation,
   MergeMethod,
   PrDetailCheck,
+  PrReviewThread,
   PrView,
+  ReviewEvent,
   SnoozeCondition,
 } from '@/types/pr';
 import { type CheckGroup, groupDetailChecks } from '@/utils/check-groups';
@@ -518,6 +790,7 @@ interface Props {
   pr: PrView | null;
   inspector: InspectorState;
   nowMs: number;
+  viewerLogin?: string;
   resolvedTheme?: ResolvedTheme;
   syncState?: PrSyncState;
   draftState?: PrDraftState;
@@ -527,9 +800,14 @@ interface Props {
   rerunState?: PrRerunState;
   checkSummaryStates?: Record<string, CheckSummaryState>;
   triageState?: PrTriageState;
+  reviewSubmitState?: PrReviewSubmitState;
+  threadActionStates?: Record<string, ThreadActionState>;
+  repoReviewersState?: RepoReviewersState;
+  prReviewersState?: PrReviewersState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  viewerLogin: '',
   resolvedTheme: 'dark',
   syncState: () => IDLE_PR_SYNC_STATE,
   draftState: () => IDLE_PR_DRAFT_STATE,
@@ -539,6 +817,10 @@ const props = withDefaults(defineProps<Props>(), {
   rerunState: () => IDLE_PR_RERUN_STATE,
   checkSummaryStates: () => ({}),
   triageState: () => IDLE_PR_TRIAGE_STATE,
+  reviewSubmitState: () => IDLE_PR_REVIEW_SUBMIT_STATE,
+  threadActionStates: () => ({}),
+  repoReviewersState: () => IDLE_REPO_REVIEWERS_STATE,
+  prReviewersState: () => IDLE_PR_REVIEWERS_STATE,
 });
 
 const emit = defineEmits<{
@@ -558,6 +840,20 @@ const emit = defineEmits<{
   'toggle-pin': [pr: PrView];
   snooze: [pr: PrView, condition: SnoozeCondition];
   unsnooze: [pr: PrView];
+  'submit-review': [pr: PrView, event: ReviewEvent, body?: string];
+  'reply-thread': [pr: PrView, threadId: string, body: string];
+  'resolve-thread': [pr: PrView, threadId: string, resolved: boolean];
+  'load-reviewers': [pr: PrView];
+  'retry-load-reviewers': [pr: PrView];
+  'update-reviewers': [
+    pr: PrView,
+    changes: {
+      addUsers?: string[];
+      removeUsers?: string[];
+      addTeams?: string[];
+      removeTeams?: string[];
+    },
+  ];
   'open-mermaid': [source: string];
 }>();
 
@@ -590,6 +886,114 @@ const syncAriaLabel = computed<string>(() => {
 
 const descriptionHeadingId = `description-heading-${useId()}`;
 const checksHeadingId = `checks-heading-${useId()}`;
+const reviewTextareaId = `quick-review-body-${useId()}`;
+
+type QuickReviewMode =
+  | { status: 'idle' }
+  | { status: 'confirm-approve'; body: string }
+  | { status: 'compose'; event: 'COMMENT' | 'REQUEST_CHANGES'; body: string };
+
+const quickReview = ref<QuickReviewMode>({ status: 'idle' });
+const showResolvedThreads = ref<boolean>(false);
+const openReplyThreadId = ref<string | null>(null);
+const replyDrafts = ref<Record<string, string>>({});
+
+const isOwnPr = computed<boolean>(() => {
+  if (!props.pr || !props.viewerLogin) {
+    return false;
+  }
+  return props.pr.author.toLowerCase() === props.viewerLogin.toLowerCase();
+});
+
+const allReviewThreads = computed<PrReviewThread[]>(() => {
+  if (props.inspector.status !== 'open') {
+    return [];
+  }
+  return props.inspector.detail.reviewThreads ?? [];
+});
+
+const unresolvedThreads = computed<PrReviewThread[]>(() =>
+  allReviewThreads.value.filter((t) => !t.isResolved),
+);
+
+const resolvedThreadCount = computed<number>(
+  () => allReviewThreads.value.length - unresolvedThreads.value.length,
+);
+
+const visibleReviewThreads = computed<PrReviewThread[]>(() =>
+  showResolvedThreads.value ? allReviewThreads.value : unresolvedThreads.value,
+);
+
+function startQuickApprove(): void {
+  if (props.reviewSubmitState.status === 'submitting') {
+    return;
+  }
+  quickReview.value =
+    quickReview.value.status === 'confirm-approve'
+      ? { status: 'idle' }
+      : { status: 'confirm-approve', body: '' };
+}
+
+function startQuickCompose(event: 'COMMENT' | 'REQUEST_CHANGES'): void {
+  if (props.reviewSubmitState.status === 'submitting') {
+    return;
+  }
+  if (quickReview.value.status === 'compose' && quickReview.value.event === event) {
+    quickReview.value = { status: 'idle' };
+    return;
+  }
+  quickReview.value = { status: 'compose', event, body: '' };
+}
+
+function cancelQuickReview(): void {
+  quickReview.value = { status: 'idle' };
+}
+
+function submitQuickReview(event: ReviewEvent, body: string): void {
+  if (!props.pr) {
+    return;
+  }
+  emit('submit-review', props.pr, event, body);
+  quickReview.value = { status: 'idle' };
+}
+
+function getThreadState(threadId: string): ThreadActionState {
+  return props.threadActionStates[threadId] ?? IDLE_THREAD_ACTION_STATE;
+}
+
+function isThreadBusy(threadId: string): boolean {
+  const st = getThreadState(threadId).status;
+  return st === 'replying' || st === 'resolving';
+}
+
+function formatThreadLocation(thread: PrReviewThread): string {
+  const line = thread.line ?? thread.originalLine;
+  return line ? `${thread.path}:${line}` : thread.path;
+}
+
+function toggleReplyBox(threadId: string): void {
+  openReplyThreadId.value = openReplyThreadId.value === threadId ? null : threadId;
+}
+
+function submitThreadReply(threadId: string): void {
+  if (!props.pr) {
+    return;
+  }
+  const body = (replyDrafts.value[threadId] ?? '').trim();
+  if (!body) {
+    return;
+  }
+  emit('reply-thread', props.pr, threadId, body);
+  replyDrafts.value = { ...replyDrafts.value, [threadId]: '' };
+  openReplyThreadId.value = null;
+}
+
+function onToggleThreadResolved(thread: PrReviewThread): void {
+  if (!props.pr || isThreadBusy(thread.id)) {
+    return;
+  }
+  emit('resolve-thread', props.pr, thread.id, !thread.isResolved);
+}
 
 const checkGroups = computed<CheckGroup[]>(() => {
   if (props.inspector.status !== 'open') {
@@ -737,6 +1141,9 @@ watch(
   () => {
     expandedCheckIds.value = new Set();
     copiedCheckId.value = null;
+    quickReview.value = { status: 'idle' };
+    showResolvedThreads.value = false;
+    openReplyThreadId.value = null;
   },
 );
 
@@ -1522,6 +1929,230 @@ async function copyLogExcerpt(checkRunId: number, text: string): Promise<void> {
   font-size: 0.71rem;
   line-height: 1.45;
   white-space: pre;
+}
+
+.quick-review-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+}
+
+.quick-review-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.quick-review-triggers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.qr-btn {
+  min-block-size: 1.7rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-primary);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.qr-btn.active {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+}
+
+.qr-approve-btn {
+  border-color: var(--accent-emerald);
+  color: var(--accent-emerald);
+}
+
+.qr-approve-btn.active {
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+}
+
+.qr-changes-btn {
+  border-color: color-mix(in srgb, var(--accent-red) 60%, var(--border-strong));
+  color: var(--accent-red);
+}
+
+.qr-changes-btn.active {
+  border-color: var(--accent-red);
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+}
+
+.quick-review-form,
+.thread-reply-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.quick-review-textarea {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.35rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  resize: vertical;
+}
+
+.quick-review-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.qr-submit-btn {
+  min-block-size: 1.8rem;
+  padding: 0.2rem 0.65rem;
+  border-radius: 0.35rem;
+  border: 1px solid var(--accent-blue);
+  background-color: var(--accent-blue);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.qr-submit-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.qr-submit-approve {
+  border-color: var(--accent-emerald);
+  background-color: var(--accent-emerald);
+  color: light-dark(#ffffff, #0b1017);
+}
+
+.qr-submit-changes {
+  border-color: var(--accent-red);
+  background-color: var(--accent-red);
+  color: #ffffff;
+}
+
+.qr-cancel-btn,
+.thread-action-btn {
+  min-block-size: 1.65rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.qr-cancel-btn:hover,
+.thread-action-btn:hover:not(:disabled) {
+  color: var(--ink-primary);
+  background-color: var(--bg-surface-hover);
+}
+
+.thread-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.thread-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+}
+
+.thread-card.resolved {
+  opacity: 0.72;
+}
+
+.thread-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+}
+
+.thread-path {
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+.thread-badges {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.thread-tag {
+  padding: 0.04rem 0.32rem;
+  border-radius: 0.25rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.thread-tag.resolved-tag {
+  color: var(--accent-emerald);
+  border-color: color-mix(in srgb, var(--accent-emerald) 45%, transparent);
+}
+
+.thread-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-inline-start: auto;
+}
+
+.thread-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.thread-comment {
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.35rem;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.thread-comment-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
 }
 
 .check-badge,

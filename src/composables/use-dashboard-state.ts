@@ -7,13 +7,20 @@ import type {
   PrLabel,
   PrView,
   RepoLabelsResponse,
+  RepoReviewerOption,
+  RepoReviewersResponse,
   RerunFailedChecksResponse,
+  ReviewEvent,
   SnapshotResponse,
   SnoozeCondition,
+  SubmitReviewResponse,
+  ThreadReplyResponse,
+  ThreadResolveResponse,
   ToggleDraftResponse,
   TriageAction,
   UpdateBranchResponse,
   UpdateLabelsResponse,
+  UpdateReviewersResponse,
   UpdateTriageResponse,
 } from '@/types/pr';
 import { sortPullsPinnedFirst } from '@/utils/triage';
@@ -126,6 +133,69 @@ export type PrTriageEvent =
   | { type: 'RESET' };
 
 export const IDLE_PR_TRIAGE_STATE: PrTriageState = { status: 'idle' };
+
+export type PrReviewSubmitState =
+  | { status: 'idle' }
+  | { status: 'submitting'; event: ReviewEvent }
+  | { status: 'submitted'; event: ReviewEvent; message: string }
+  | { status: 'error'; event: ReviewEvent; error: string };
+
+export type PrReviewSubmitEvent =
+  | { type: 'SUBMIT_REQUEST'; event: ReviewEvent }
+  | { type: 'SUBMIT_SUCCEEDED'; event: ReviewEvent; message: string }
+  | { type: 'SUBMIT_FAILED'; event: ReviewEvent; error: string }
+  | { type: 'RESET' };
+
+export const IDLE_PR_REVIEW_SUBMIT_STATE: PrReviewSubmitState = { status: 'idle' };
+
+export function transitionPrReviewSubmitState(
+  current: PrReviewSubmitState,
+  event: PrReviewSubmitEvent,
+): PrReviewSubmitState {
+  if (event.type === 'RESET') {
+    return IDLE_PR_REVIEW_SUBMIT_STATE;
+  }
+  switch (current.status) {
+    case 'idle':
+    case 'error':
+    case 'submitted':
+      if (event.type === 'SUBMIT_REQUEST') {
+        return { status: 'submitting', event: event.event };
+      }
+      return current;
+    case 'submitting':
+      if (event.type === 'SUBMIT_SUCCEEDED') {
+        return { status: 'submitted', event: event.event, message: event.message };
+      }
+      if (event.type === 'SUBMIT_FAILED') {
+        return { status: 'error', event: event.event, error: event.error };
+      }
+      return current;
+  }
+}
+
+export type ThreadActionState =
+  | { status: 'idle' }
+  | { status: 'replying' }
+  | { status: 'resolving' }
+  | { status: 'error'; error: string };
+
+export const IDLE_THREAD_ACTION_STATE: ThreadActionState = { status: 'idle' };
+
+export type RepoReviewersState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; reviewers: RepoReviewerOption[]; fetchedAtMs: number }
+  | { status: 'error'; error: string };
+
+export const IDLE_REPO_REVIEWERS_STATE: RepoReviewersState = { status: 'idle' };
+
+export type PrReviewersState =
+  | { status: 'idle' }
+  | { status: 'saving' }
+  | { status: 'error'; error: string };
+
+export const IDLE_PR_REVIEWERS_STATE: PrReviewersState = { status: 'idle' };
 
 export function transitionPrTriageState(
   current: PrTriageState,
@@ -346,6 +416,10 @@ export function useDashboardState(
   const rerunStates = ref<Record<string, PrRerunState>>({});
   const checkSummaryStates = ref<Record<string, CheckSummaryState>>({});
   const triageStates = ref<Record<string, PrTriageState>>({});
+  const reviewSubmitStates = ref<Record<string, PrReviewSubmitState>>({});
+  const threadActionStates = ref<Record<string, ThreadActionState>>({});
+  const repoReviewersStates = ref<Record<string, RepoReviewersState>>({});
+  const prReviewersStates = ref<Record<string, PrReviewersState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -1135,6 +1209,321 @@ export function useDashboardState(
     }
   }
 
+  function getReviewSubmitState(prKey: string): PrReviewSubmitState {
+    return reviewSubmitStates.value[prKey] ?? IDLE_PR_REVIEW_SUBMIT_STATE;
+  }
+
+  function setReviewSubmitState(prKey: string, next: PrReviewSubmitState): void {
+    if (next.status === 'idle') {
+      if (!(prKey in reviewSubmitStates.value)) {
+        return;
+      }
+      const copy = { ...reviewSubmitStates.value };
+      delete copy[prKey];
+      reviewSubmitStates.value = copy;
+      return;
+    }
+    reviewSubmitStates.value = {
+      ...reviewSubmitStates.value,
+      [prKey]: next,
+    };
+  }
+
+  async function submitPullReview(pr: PrView, event: ReviewEvent, body?: string): Promise<boolean> {
+    const current = getReviewSubmitState(pr.key);
+    if (current.status === 'submitting') {
+      return false;
+    }
+    setReviewSubmitState(
+      pr.key,
+      transitionPrReviewSubmitState(current, { type: 'SUBMIT_REQUEST', event }),
+    );
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/review`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ event, ...(body?.trim() ? { body: body.trim() } : {}) }),
+        },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to submit review (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as SubmitReviewResponse;
+      const label =
+        data.event === 'APPROVE'
+          ? 'Approved pull request.'
+          : data.event === 'REQUEST_CHANGES'
+            ? 'Requested changes.'
+            : 'Posted review comment.';
+      detailCache.delete(pr.key);
+      setReviewSubmitState(
+        pr.key,
+        transitionPrReviewSubmitState(getReviewSubmitState(pr.key), {
+          type: 'SUBMIT_SUCCEEDED',
+          event: data.event,
+          message: label,
+        }),
+      );
+      announcement.value = `${label} (${pr.key})`;
+      if (inspector.value.status !== 'closed' && inspector.value.key === pr.key) {
+        void openInspector(pr, { force: true, preserveExisting: true });
+      }
+      if (fetchInFlight) {
+        pendingRefreshAfterSync = true;
+      } else {
+        void fetchSnapshot(false);
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to submit review';
+      setReviewSubmitState(
+        pr.key,
+        transitionPrReviewSubmitState(getReviewSubmitState(pr.key), {
+          type: 'SUBMIT_FAILED',
+          event,
+          error: message,
+        }),
+      );
+      announcement.value = `Failed to submit review on ${pr.key}: ${message}`;
+      return false;
+    }
+  }
+
+  function setThreadActionState(threadId: string, next: ThreadActionState): void {
+    if (next.status === 'idle') {
+      if (!(threadId in threadActionStates.value)) {
+        return;
+      }
+      const copy = { ...threadActionStates.value };
+      delete copy[threadId];
+      threadActionStates.value = copy;
+      return;
+    }
+    threadActionStates.value = {
+      ...threadActionStates.value,
+      [threadId]: next,
+    };
+  }
+
+  async function replyToPullThread(pr: PrView, threadId: string, body: string): Promise<boolean> {
+    const existing = threadActionStates.value[threadId] ?? IDLE_THREAD_ACTION_STATE;
+    if (existing.status === 'replying' || existing.status === 'resolving') {
+      return false;
+    }
+    setThreadActionState(threadId, { status: 'replying' });
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/threads/${encodeURIComponent(threadId)}/reply`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ body: body.trim() }),
+        },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to reply to thread (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as ThreadReplyResponse;
+      detailCache.delete(pr.key);
+      setThreadActionState(threadId, IDLE_THREAD_ACTION_STATE);
+
+      if (inspector.value.status === 'open' && inspector.value.key === pr.key) {
+        const nextThreads = (inspector.value.detail.reviewThreads ?? []).map((t) =>
+          t.id === threadId ? { ...t, comments: [...t.comments, data.comment] } : t,
+        );
+        inspector.value = {
+          ...inspector.value,
+          detail: { ...inspector.value.detail, reviewThreads: nextThreads },
+        };
+      }
+      announcement.value = `Replied to review thread on ${pr.key}.`;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to reply to thread';
+      setThreadActionState(threadId, { status: 'error', error: message });
+      announcement.value = `Failed to reply on ${pr.key}: ${message}`;
+      return false;
+    }
+  }
+
+  async function togglePullThreadResolved(
+    pr: PrView,
+    threadId: string,
+    resolved: boolean,
+  ): Promise<boolean> {
+    const existing = threadActionStates.value[threadId] ?? IDLE_THREAD_ACTION_STATE;
+    if (existing.status === 'replying' || existing.status === 'resolving') {
+      return false;
+    }
+    setThreadActionState(threadId, { status: 'resolving' });
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/threads/${encodeURIComponent(threadId)}/resolve`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ resolved }),
+        },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to update thread (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as ThreadResolveResponse;
+      detailCache.delete(pr.key);
+      setThreadActionState(threadId, IDLE_THREAD_ACTION_STATE);
+
+      if (inspector.value.status === 'open' && inspector.value.key === pr.key) {
+        const nextThreads = (inspector.value.detail.reviewThreads ?? []).map((t) =>
+          t.id === threadId ? { ...t, isResolved: data.isResolved } : t,
+        );
+        const unresolvedCount = nextThreads.filter((t) => !t.isResolved).length;
+        inspector.value = {
+          ...inspector.value,
+          detail: { ...inspector.value.detail, reviewThreads: nextThreads },
+        };
+        if (snapshot.value) {
+          snapshot.value = {
+            ...snapshot.value,
+            pullRequests: snapshot.value.pullRequests.map((item) =>
+              item.key === pr.key ? { ...item, unresolvedThreadCount: unresolvedCount } : item,
+            ),
+          };
+        }
+      }
+      announcement.value = data.isResolved
+        ? `Resolved review thread on ${pr.key}.`
+        : `Reopened review thread on ${pr.key}.`;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update thread';
+      setThreadActionState(threadId, { status: 'error', error: message });
+      announcement.value = `Failed to update thread on ${pr.key}: ${message}`;
+      return false;
+    }
+  }
+
+  async function loadRepoReviewers(owner: string, repo: string, force = false): Promise<void> {
+    const repoKey = `${owner}/${repo}`;
+    const existing = repoReviewersStates.value[repoKey] ?? IDLE_REPO_REVIEWERS_STATE;
+    if (existing.status === 'loading') {
+      return;
+    }
+    if (
+      !force &&
+      existing.status === 'ready' &&
+      Date.now() - existing.fetchedAtMs < REPO_LABELS_TTL_MS
+    ) {
+      return;
+    }
+
+    repoReviewersStates.value = {
+      ...repoReviewersStates.value,
+      [repoKey]: { status: 'loading' },
+    };
+
+    try {
+      const response = await fetchFn(
+        `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/reviewers`,
+        { headers: { Accept: 'application/json' } },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to load reviewers (HTTP ${response.status})`);
+      }
+      const data = (await response.json()) as RepoReviewersResponse;
+      repoReviewersStates.value = {
+        ...repoReviewersStates.value,
+        [repoKey]: { status: 'ready', reviewers: data.reviewers, fetchedAtMs: Date.now() },
+      };
+    } catch (error) {
+      repoReviewersStates.value = {
+        ...repoReviewersStates.value,
+        [repoKey]: {
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Failed to load repository reviewers',
+        },
+      };
+    }
+  }
+
+  async function updatePullReviewers(
+    pr: PrView,
+    changes: {
+      addUsers?: string[];
+      removeUsers?: string[];
+      addTeams?: string[];
+      removeTeams?: string[];
+    },
+  ): Promise<boolean> {
+    const existing = prReviewersStates.value[pr.key] ?? IDLE_PR_REVIEWERS_STATE;
+    if (existing.status === 'saving') {
+      return false;
+    }
+    prReviewersStates.value = {
+      ...prReviewersStates.value,
+      [pr.key]: { status: 'saving' },
+    };
+
+    try {
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/reviewers`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(changes),
+        },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to update reviewers (HTTP ${response.status})`);
+      }
+      (await response.json()) as UpdateReviewersResponse;
+      detailCache.delete(pr.key);
+      const copy = { ...prReviewersStates.value };
+      delete copy[pr.key];
+      prReviewersStates.value = copy;
+
+      if (inspector.value.status !== 'closed' && inspector.value.key === pr.key) {
+        void openInspector(pr, { force: true, preserveExisting: true });
+      }
+      announcement.value = `Updated reviewers on ${pr.key}.`;
+      if (fetchInFlight) {
+        pendingRefreshAfterSync = true;
+      } else {
+        void fetchSnapshot(false);
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update reviewers';
+      prReviewersStates.value = {
+        ...prReviewersStates.value,
+        [pr.key]: { status: 'error', error: message },
+      };
+      announcement.value = `Failed to update reviewers on ${pr.key}: ${message}`;
+      return false;
+    }
+  }
+
   async function togglePullDraft(pr: PrView, nextDraft?: boolean): Promise<void> {
     const targetDraft = nextDraft ?? !pr.isDraft;
     const current = getDraftState(pr.key);
@@ -1490,11 +1879,20 @@ export function useDashboardState(
     rerunStates,
     checkSummaryStates,
     triageStates,
+    reviewSubmitStates,
+    threadActionStates,
+    repoReviewersStates,
+    prReviewersStates,
     fetchSnapshot,
     syncPullRequest,
     rerunPullChecks,
     loadCheckSummary,
     updatePullTriage,
+    submitPullReview,
+    replyToPullThread,
+    togglePullThreadResolved,
+    loadRepoReviewers,
+    updatePullReviewers,
     togglePullDraft,
     mergePullRequest,
     loadRepoLabels,

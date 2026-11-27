@@ -277,6 +277,11 @@ Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0
 - `POST /api/pull/{owner}/{repo}/{number}/rerun-failed` — re-runs failed GitHub Actions workflow runs for the pull request head commit or a specific failed Actions job/run (same-origin protected)
 - `GET /api/pull/{owner}/{repo}/{number}/checks/{checkRunId}/summary` — loads check run output, annotations (up to 25), and bounded plain-text GitHub Actions job log excerpts on demand for failing checks in the inspector
 - `POST /api/pull/{owner}/{repo}/{number}/triage` — pins, unpins, snoozes (by time, next push, CI change, or activity), or unsnoozes a pull request in local `.cache/state.json` (same-origin protected)
+- `POST /api/pull/{owner}/{repo}/{number}/review` — submits a quick review (`APPROVE`, `COMMENT`, or `REQUEST_CHANGES`, same-origin protected)
+- `POST /api/pull/{owner}/{repo}/{number}/threads/{threadId}/reply` — posts a reply to a pull request review thread (same-origin protected)
+- `POST /api/pull/{owner}/{repo}/{number}/threads/{threadId}/resolve` — resolves or reopens a pull request review thread (same-origin protected)
+- `GET /api/repo/{owner}/{repo}/reviewers` — lists assignable repository reviewers (cached 5 minutes per repository)
+- `POST /api/pull/{owner}/{repo}/{number}/reviewers` — requests or removes pull request reviewers (same-origin protected)
 
 ## Troubleshooting
 

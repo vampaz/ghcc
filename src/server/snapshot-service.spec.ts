@@ -100,6 +100,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({
@@ -183,6 +188,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
       invalidatePullDetailCache,
     };
 
@@ -266,6 +276,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({
@@ -334,6 +349,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({
@@ -392,6 +412,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({
@@ -487,6 +512,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({
@@ -557,6 +587,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service1 = createSnapshotService({
@@ -659,6 +694,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({
@@ -780,6 +820,11 @@ describe('snapshot-service & state machine', () => {
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
       fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
+      submitPullReview: vi.fn<GitHubClient['submitPullReview']>(),
+      replyToReviewThread: vi.fn<GitHubClient['replyToReviewThread']>(),
+      setReviewThreadResolved: vi.fn<GitHubClient['setReviewThreadResolved']>(),
+      fetchRepoReviewers: vi.fn<GitHubClient['fetchRepoReviewers']>(),
+      updatePullReviewers: vi.fn<GitHubClient['updatePullReviewers']>(),
     };
 
     const service = createSnapshotService({

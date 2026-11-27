@@ -23,6 +23,14 @@
           <span class="pr-tags">
             <span v-if="isPinned" class="tag" data-tone="blue">pinned</span>
             <span v-if="isSnoozed" class="tag" data-tone="muted">{{ snoozeBadgeText }}</span>
+            <span
+              v-if="(pr.unresolvedThreadCount ?? 0) > 0"
+              class="tag mono-num"
+              data-tone="amber"
+              :title="`${pr.unresolvedThreadCount} unresolved review ${pr.unresolvedThreadCount === 1 ? 'thread' : 'threads'}`"
+            >
+              {{ pr.unresolvedThreadCount }} unresolved
+            </span>
             <span v-if="!pr.sources.includes('authored')" class="tag" data-tone="muted">
               @{{ pr.author }}
             </span>
