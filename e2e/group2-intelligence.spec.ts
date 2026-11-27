@@ -249,3 +249,74 @@ test('groups cross-repo mission PRs, navigates mission siblings in inspector, an
   await expect(mergeDialog).toContainText('Dependency order notice');
   await expect(mergeDialog).toContainText('acme/frontend#101');
 });
+
+test('surfaces blast-radius file overlaps on cards, inspector, and merge confirmation dialog', async ({
+  page,
+}) => {
+  const base = makeSnapshot();
+  const pr1 = {
+    ...base.pullRequests[0]!,
+    overlaps: [
+      {
+        prKey: 'acme/web-app#202',
+        number: 202,
+        title: 'feat: dark theme tokens',
+        author: 'vampaz',
+        isDraft: false,
+        sharedFiles: ['src/auth.ts', 'src/session.ts'],
+        sharedCount: 2,
+      },
+    ],
+  };
+  const snapshot = makeSnapshot({
+    pullRequests: [pr1, ...base.pullRequests.slice(1)],
+  });
+
+  await page.route('**/api/presets', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ presets: [] }),
+    });
+  });
+
+  await page.route('**/api/pull/*/*/*', async (route) => {
+    const { pathname } = new URL(route.request().url());
+    const pr = pathname.includes('202') ? base.pullRequests[1]! : pr1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(makePrDetail(pr)),
+    });
+  });
+
+  await page.route('**/api/snapshot', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { etag: '"e2e-blast"' },
+      body: JSON.stringify(snapshot),
+    });
+  });
+
+  await page.goto('/');
+
+  const firstCard = page.locator('.action-queue .pr-card').first();
+  await expect(firstCard).toContainText('1 overlap');
+
+  await firstCard.locator('.pr-card-trigger').click();
+  const inspector = page.locator('.inspector-dialog.open');
+  await expect(inspector).toContainText('Blast Radius · File Overlaps');
+  await expect(inspector).toContainText('src/auth.ts');
+
+  // Clicking overlapping PR jumps directly to inspect it
+  await inspector.locator('.overlap-head-btn').first().click();
+  await expect(inspector).toContainText('acme/web-app#202');
+
+  // Merge confirmation dialog warns about shared files before merging
+  await firstCard.getByRole('button', { name: /Squash — acme\/core-api#101/i }).click();
+  const mergeDialog = page.locator('.merge-confirm-dialog');
+  await expect(mergeDialog).toBeVisible();
+  await expect(mergeDialog).toContainText('Blast radius — shared files with open PRs');
+  await expect(mergeDialog).toContainText('src/auth.ts');
+});

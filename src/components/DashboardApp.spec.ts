@@ -2820,4 +2820,61 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('surfaces blast-radius file overlaps on cards, in the inspector, and in MergeConfirmDialog', async () => {
+    const snap = makeSnapshot();
+    snap.pullRequests[0]!.overlaps = [
+      {
+        prKey: 'acme/web-app#202',
+        number: 202,
+        title: 'feat: dark theme tokens',
+        author: 'vampaz',
+        isDraft: false,
+        sharedFiles: ['src/auth.ts', 'src/session.ts'],
+        sharedCount: 2,
+      },
+    ];
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/presets') {
+        return new Response(JSON.stringify({ presets: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/pull/')) {
+        return new Response(JSON.stringify(makeDetail()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(snap), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"overlap-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    const firstCard = wrapper.find('.action-queue .pr-card');
+    expect(firstCard.text()).toContain('1 overlap');
+
+    await firstCard.find('.pr-card-trigger').trigger('click');
+    await flushPromises();
+    const inspector = wrapper.find('.inspector-dialog');
+    expect(inspector.find('.overlap-detail-section').exists()).toBe(true);
+    expect(inspector.text()).toContain('src/auth.ts');
+    expect(inspector.text()).toContain('#202');
+
+    await firstCard.find('.merge-main-btn').trigger('click');
+    await flushPromises();
+    const mergeDialog = wrapper.find('.merge-confirm-dialog');
+    expect(mergeDialog.text()).toContain('Blast radius');
+    expect(mergeDialog.text()).toContain('src/auth.ts');
+
+    wrapper.unmount();
+  });
 });

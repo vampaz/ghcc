@@ -59,6 +59,15 @@
                 </template>
               </span>
               <span
+                v-if="(pr.overlaps?.length ?? 0) > 0"
+                class="tag mono-num"
+                data-tone="amber"
+                :title="overlapTooltip"
+              >
+                {{ pr.overlaps!.length }}
+                {{ pr.overlaps!.length === 1 ? 'overlap' : 'overlaps' }}
+              </span>
+              <span
                 v-if="(pr.unresolvedThreadCount ?? 0) > 0"
                 class="tag mono-num"
                 data-tone="amber"
@@ -394,6 +403,18 @@ const missionTooltip = computed<string>(() => {
     parts.push(`depends on ${m.blockedByKeys.join(', ')}`);
   }
   return parts.join(' · ');
+});
+
+const overlapTooltip = computed<string>(() => {
+  const overlaps = props.pr.overlaps ?? [];
+  if (overlaps.length === 0) {
+    return '';
+  }
+  const summary = overlaps
+    .slice(0, 3)
+    .map((o) => `#${o.number} (${o.sharedCount} ${o.sharedCount === 1 ? 'file' : 'files'})`)
+    .join(', ');
+  return `Touches shared files with open PR(s): ${summary}`;
 });
 
 function onPinClick(): void {

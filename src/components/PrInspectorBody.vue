@@ -179,6 +179,42 @@
       </ul>
     </section>
 
+    <section
+      v-if="pr?.overlaps && pr.overlaps.length > 0"
+      class="detail-section overlap-detail-section"
+      aria-label="Blast radius file overlaps"
+    >
+      <div class="detail-heading-row">
+        <h2 class="detail-heading">
+          Blast Radius · File Overlaps
+          <span class="mono-num detail-count">{{ pr.overlaps.length }}</span>
+        </h2>
+      </div>
+      <ul role="list" class="overlap-list">
+        <li v-for="item in pr.overlaps" :key="item.prKey" class="overlap-card">
+          <button
+            type="button"
+            class="overlap-head-btn"
+            @click="$emit('select-pr-key', item.prKey)"
+          >
+            <span class="overlap-pr-key mono-num">#{{ item.number }}</span>
+            <span class="overlap-pr-title">{{ item.title }}</span>
+            <span class="overlap-count mono-num">
+              {{ item.sharedCount }} {{ item.sharedCount === 1 ? 'file' : 'files' }}
+            </span>
+          </button>
+          <div class="overlap-paths">
+            <code v-for="path in item.sharedFiles" :key="path" class="overlap-path">{{
+              path
+            }}</code>
+            <span v-if="item.sharedCount > item.sharedFiles.length" class="overlap-more mono-num">
+              +{{ item.sharedCount - item.sharedFiles.length }} more
+            </span>
+          </div>
+        </li>
+      </ul>
+    </section>
+
     <div v-if="inspector.status === 'loading'" class="state-box">
       Loading checks, reviewers, and timeline...
     </div>
@@ -913,6 +949,7 @@ const emit = defineEmits<{
   ];
   'open-mermaid': [source: string];
   'select-pr': [pr: PrView];
+  'select-pr-key': [prKey: string];
 }>();
 
 const showSyncAction = computed<boolean>(
@@ -2410,5 +2447,88 @@ async function copyLogExcerpt(checkRunId: number, text: string): Promise<void> {
 .mission-sibling-status[data-bucket='ready'] {
   background-color: var(--accent-emerald-bg);
   color: var(--accent-emerald);
+}
+
+.overlap-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.overlap-card {
+  border-radius: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--accent-amber) 45%, var(--border-subtle));
+  background-color: color-mix(in srgb, var(--accent-amber-bg) 35%, var(--bg-surface-muted));
+  padding: 0.45rem 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.overlap-head-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.overlap-head-btn:hover .overlap-pr-title {
+  text-decoration: underline;
+}
+
+.overlap-pr-key {
+  flex: 0 0 auto;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--accent-amber);
+}
+
+.overlap-pr-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overlap-count {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.overlap-paths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.overlap-path {
+  padding: 0.08rem 0.35rem;
+  border-radius: 0.25rem;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
+}
+
+.overlap-more {
+  font-size: 0.68rem;
+  color: var(--ink-muted);
+  align-self: center;
 }
 </style>

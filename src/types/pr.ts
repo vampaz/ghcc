@@ -109,6 +109,17 @@ export interface PrView {
   unresolvedThreadCount?: number;
   triage?: PrTriageInfo;
   mission?: PrMissionInfo;
+  overlaps?: PrFileOverlap[];
+}
+
+export interface PrFileOverlap {
+  prKey: string;
+  number: number;
+  title: string;
+  author: string;
+  isDraft: boolean;
+  sharedFiles: string[];
+  sharedCount: number;
 }
 
 export interface PrMissionInfo {

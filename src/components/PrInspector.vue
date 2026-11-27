@@ -77,6 +77,7 @@
         @update-labels="(target, labels) => $emit('update-labels', target, labels)"
         @open-mermaid="$emit('open-mermaid', $event)"
         @select-pr="$emit('select-pr', $event)"
+        @select-pr-key="$emit('select-pr-key', $event)"
       />
     </div>
   </aside>
@@ -140,6 +141,7 @@
       @update-labels="(target, labels) => $emit('update-labels', target, labels)"
       @open-mermaid="$emit('open-mermaid', $event)"
       @select-pr="$emit('select-pr', $event)"
+      @select-pr-key="$emit('select-pr-key', $event)"
     />
   </section>
 </template>
@@ -258,6 +260,7 @@ defineEmits<{
   ];
   'open-mermaid': [source: string];
   'select-pr': [pr: PrView];
+  'select-pr-key': [prKey: string];
 }>();
 
 const lastOpenPr = ref<PrView | null>(props.pr);

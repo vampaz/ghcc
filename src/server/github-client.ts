@@ -673,6 +673,19 @@ export interface DraftBranchCompareResult {
   rateLimit: RateLimitBucket | null;
 }
 
+export interface PullFilesBatchItem {
+  key: string;
+  owner: string;
+  repo: string;
+  number: number;
+  headRefOid: string;
+}
+
+export interface PullFilesBatchResult {
+  filesByKey: Record<string, string[]>;
+  rateLimit: RateLimitBucket | null;
+}
+
 export interface GitHubClient {
   fetchAuthoredPulls(options?: { maxPages?: number }): Promise<AuthoredPullsResult>;
   fetchReviewQueue(): Promise<ReviewQueueResult>;
@@ -688,6 +701,7 @@ export interface GitHubClient {
     etag?: string,
   ): Promise<ProbeMergeabilityResult>;
   compareDraftBranches?(items: DraftBranchCompareItem[]): Promise<DraftBranchCompareResult>;
+  fetchPullFilesBatch?(items: PullFilesBatchItem[]): Promise<PullFilesBatchResult>;
   fetchPullDetail(owner: string, repo: string, number: number): Promise<PrDetailResponse>;
   updatePullBranch(
     owner: string,
@@ -1611,6 +1625,128 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
 
       await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
       return { behindByByKey, rateLimit: latestRateLimit };
+    },
+
+    async fetchPullFilesBatch(items: PullFilesBatchItem[]): Promise<PullFilesBatchResult> {
+      const MAX_FILES_BATCH = 20;
+      const groups = new Map<
+        string,
+        { owner: string; repo: string; items: PullFilesBatchItem[] }
+      >();
+
+      for (const item of items) {
+        if (
+          !SAFE_SEGMENT_RE.test(item.owner) ||
+          !SAFE_SEGMENT_RE.test(item.repo) ||
+          !Number.isInteger(item.number) ||
+          item.number <= 0
+        ) {
+          continue;
+        }
+        const groupKey = `${item.owner}/${item.repo}`;
+        let group = groups.get(groupKey);
+        if (!group) {
+          group = { owner: item.owner, repo: item.repo, items: [] };
+          groups.set(groupKey, group);
+        }
+        group.items.push(item);
+      }
+
+      const chunks: Array<{ owner: string; repo: string; items: PullFilesBatchItem[] }> = [];
+      for (const group of groups.values()) {
+        for (let offset = 0; offset < group.items.length; offset += MAX_FILES_BATCH) {
+          chunks.push({
+            owner: group.owner,
+            repo: group.repo,
+            items: group.items.slice(offset, offset + MAX_FILES_BATCH),
+          });
+        }
+      }
+
+      const filesByKey: Record<string, string[]> = {};
+      let latestRateLimit: RateLimitBucket | null = null;
+      if (chunks.length === 0) {
+        return { filesByKey, rateLimit: latestRateLimit };
+      }
+
+      interface PullFilesBatchData {
+        rateLimit?: RateLimitBucket;
+        repository?: Record<
+          string,
+          { files?: { nodes?: Array<{ path?: string | null } | null> | null } | null } | null
+        > | null;
+      }
+
+      const queue = [...chunks];
+      const concurrency = Math.min(2, queue.length);
+
+      async function runWorker(): Promise<void> {
+        while (queue.length > 0) {
+          const chunk = queue.shift();
+          if (!chunk) {
+            continue;
+          }
+          const varDefs = ['$owner: String!', '$repo: String!'];
+          const selections: string[] = [];
+          const variables: Record<string, unknown> = {
+            owner: chunk.owner,
+            repo: chunk.repo,
+          };
+          for (let i = 0; i < chunk.items.length; i++) {
+            varDefs.push(`$n${i}: Int!`);
+            selections.push(
+              `p${i}: pullRequest(number: $n${i}) { files(first: 100) { nodes { path } } }`,
+            );
+            variables[`n${i}`] = chunk.items[i]!.number;
+          }
+          const query = `
+            query FetchPullFilesBatch(${varDefs.join(', ')}) {
+              rateLimit {
+                limit
+                cost
+                remaining
+                resetAt
+              }
+              repository(owner: $owner, name: $repo) {
+                ${selections.join('\n')}
+              }
+            }
+          `;
+          try {
+            const { data, headerRateLimit } = await executeGraphql<PullFilesBatchData>(
+              query,
+              variables,
+              { strictErrors: false },
+            );
+            latestRateLimit = data.rateLimit ?? headerRateLimit ?? latestRateLimit;
+            const repoObj = data.repository;
+            if (!repoObj) {
+              continue;
+            }
+            for (let i = 0; i < chunk.items.length; i++) {
+              const nodes = repoObj[`p${i}`]?.files?.nodes;
+              if (!Array.isArray(nodes)) {
+                continue;
+              }
+              const paths = Array.from(
+                new Set(
+                  nodes
+                    .map((n) => (typeof n?.path === 'string' ? n.path.trim() : ''))
+                    .filter(Boolean),
+                ),
+              );
+              filesByKey[chunk.items[i]!.key] = paths;
+            }
+          } catch (error) {
+            if (error instanceof GitHubAuthError || error instanceof GitHubRateLimitError) {
+              throw error;
+            }
+          }
+        }
+      }
+
+      await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+      return { filesByKey, rateLimit: latestRateLimit };
     },
 
     invalidatePullDetailCache(owner: string, repo: string, number: number): void {

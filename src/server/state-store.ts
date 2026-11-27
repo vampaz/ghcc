@@ -27,6 +27,11 @@ export interface CachedDraftComparisonEntry {
   behindBy: number;
 }
 
+export interface CachedPrFilesEntry {
+  headRefOid: string;
+  paths: string[];
+}
+
 export interface PrTriageEntry {
   pinned?: boolean;
   pinnedAt?: string;
@@ -61,6 +66,7 @@ export interface PersistedState {
   mergeability: Record<string, CachedMergeabilityEntry>;
   probeCounters: Record<string, ProbeCounterEntry>;
   draftComparisons?: Record<string, CachedDraftComparisonEntry>;
+  prFiles?: Record<string, CachedPrFilesEntry>;
   triage?: Record<string, PrTriageEntry>;
   presets?: SavedFilterPreset[];
   flakeTracker?: PersistedFlakeTrackerState;
@@ -72,6 +78,7 @@ const EMPTY_STATE: PersistedState = {
   mergeability: {},
   probeCounters: {},
   draftComparisons: {},
+  prFiles: {},
   triage: {},
   presets: [],
   flakeTracker: { observations: {}, stats: {} },
@@ -102,6 +109,7 @@ export class StateStore {
           mergeability: { ...parsed.mergeability },
           probeCounters: { ...parsed.probeCounters },
           draftComparisons: parsed.draftComparisons ? { ...parsed.draftComparisons } : {},
+          prFiles: parsed.prFiles ? { ...parsed.prFiles } : {},
           triage: parsed.triage ? { ...parsed.triage } : {},
           presets: Array.isArray(parsed.presets) ? [...parsed.presets] : [],
           flakeTracker: parsed.flakeTracker
@@ -125,6 +133,7 @@ export class StateStore {
       mergeability: {},
       probeCounters: {},
       draftComparisons: {},
+      prFiles: {},
       triage: {},
       presets: [],
       flakeTracker: { observations: {}, stats: {} },
@@ -185,6 +194,31 @@ export class StateStore {
       ...state.draftComparisons,
       ...entries,
     };
+    await this.persist();
+  }
+
+  async getPrFilesMap(): Promise<Record<string, CachedPrFilesEntry>> {
+    const state = await this.load();
+    return { ...state.prFiles };
+  }
+
+  async setPrFiles(
+    entries: Record<string, CachedPrFilesEntry>,
+    pruneOpenKeys?: ReadonlySet<string>,
+  ): Promise<void> {
+    const state = await this.load();
+    const next: Record<string, CachedPrFilesEntry> = {
+      ...state.prFiles,
+      ...entries,
+    };
+    if (pruneOpenKeys) {
+      for (const key of Object.keys(next)) {
+        if (!pruneOpenKeys.has(key)) {
+          delete next[key];
+        }
+      }
+    }
+    state.prFiles = next;
     await this.persist();
   }
 
@@ -273,6 +307,7 @@ export class StateStore {
       mergeability: {},
       probeCounters: {},
       draftComparisons: {},
+      prFiles: {},
       triage: {},
       presets: [],
       flakeTracker: { observations: {}, stats: {} },

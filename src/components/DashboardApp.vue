@@ -164,6 +164,7 @@
               @update-labels="updatePullLabels"
               @open-mermaid="openMermaidFullscreen(pr, $event)"
               @select-pr="onSelectPr"
+              @select-pr-key="onSelectPrByKey"
             />
           </template>
         </ActionQueue>
@@ -225,6 +226,7 @@
                 @update-labels="updatePullLabels"
                 @open-mermaid="openMermaidFullscreen(pr, $event)"
                 @select-pr="onSelectPr"
+                @select-pr-key="onSelectPrByKey"
               />
             </template>
           </ReadyPanel>
@@ -283,6 +285,7 @@
                 @update-labels="updatePullLabels"
                 @open-mermaid="openMermaidFullscreen(pr, $event)"
                 @select-pr="onSelectPr"
+                @select-pr-key="onSelectPrByKey"
               />
             </template>
           </WaitingPanel>
@@ -368,6 +371,7 @@
       @update-labels="updatePullLabels"
       @open-mermaid="openMermaidFullscreen(selectedPr, $event)"
       @select-pr="onSelectPr"
+      @select-pr-key="onSelectPrByKey"
     />
 
     <MergeConfirmDialog
@@ -1242,6 +1246,13 @@ function onSelectPr(pr: PrView): void {
     return;
   }
   void openInspector(pr);
+}
+
+function onSelectPrByKey(prKey: string): void {
+  const found = allPullRequests.value.find((p) => p.key === prKey);
+  if (found) {
+    onSelectPr(found);
+  }
 }
 
 function focusCardByIndex(index: number): void {

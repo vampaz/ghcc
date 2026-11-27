@@ -33,6 +33,21 @@
         </div>
       </div>
 
+      <div v-if="overlapWarnings.length > 0" class="merge-dialog-warning" role="note">
+        <CarbonIcon name="warning-alt" :size="16" class="merge-warning-icon" />
+        <div class="merge-warning-list">
+          <strong>Blast radius — shared files with open PRs:</strong>
+          <ul role="list" class="merge-warning-items">
+            <li v-for="item in overlapWarnings" :key="item.prKey">
+              <span class="mono-num">#{{ item.number }}</span>
+              ({{ item.sharedCount }} {{ item.sharedCount === 1 ? 'file' : 'files' }}:
+              <code class="merge-overlap-path">{{ item.sharedFiles.slice(0, 2).join(', ') }}</code>
+              <template v-if="item.sharedCount > 2"> +{{ item.sharedCount - 2 }} more </template>)
+            </li>
+          </ul>
+        </div>
+      </div>
+
       <fieldset class="merge-method-group">
         <legend class="merge-method-legend">Merge method</legend>
         <label class="merge-method-option" :class="{ selected: chosenMethod === 'squash' }">
@@ -134,6 +149,7 @@ const isMerging = computed<boolean>(() => props.mergeState.status === 'merging')
 const errorMessage = computed<string | null>(() =>
   props.mergeState.status === 'error' ? props.mergeState.error : null,
 );
+const overlapWarnings = computed(() => (props.pr?.overlaps ?? []).slice(0, 3));
 
 const bypassNotice = computed<string | null>(() => {
   const pr = props.pr;
@@ -329,6 +345,12 @@ function onConfirm(): void {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+}
+
+.merge-overlap-path {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
 }
 
 .merge-method-group {

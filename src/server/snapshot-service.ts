@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { TokenStore } from '@/server/auth';
+import { annotateFileOverlaps } from '@/server/derive/blast-radius';
 import { extractCheckOutcomes } from '@/server/derive/checks';
 import { deriveCiOutages } from '@/server/derive/ci-outages';
 import {
@@ -21,9 +22,15 @@ import {
   GitHubRateLimitError,
   type DraftBranchCompareItem,
   type GitHubClient,
+  type PullFilesBatchItem,
 } from '@/server/github-client';
 import { sanitizeErrorMessage } from '@/server/redact';
-import type { CachedDraftComparisonEntry, PrTriageEntry, StateStore } from '@/server/state-store';
+import type {
+  CachedDraftComparisonEntry,
+  CachedPrFilesEntry,
+  PrTriageEntry,
+  StateStore,
+} from '@/server/state-store';
 import type {
   PrTriageInfo,
   RateLimitBucket,
@@ -225,10 +232,21 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
               .catch(() => ({ observations: {}, stats: {} }));
             const flaked = annotateFlakyPullRequests(triaged.pullRequests, flakeState, currentMs);
             const missioned = deriveMissions(flaked.pullRequests);
+            const cachedPrFiles: Record<string, CachedPrFilesEntry> = await deps.stateStore
+              .getPrFilesMap()
+              .catch(() => ({}));
+            const hydratedFilesMap = new Map<string, string[]>();
+            for (const pr of missioned.pullRequests) {
+              const entry = cachedPrFiles[pr.key];
+              if (entry && entry.headRefOid === pr.headRefOid) {
+                hydratedFilesMap.set(pr.key, entry.paths);
+              }
+            }
+            const withOverlaps = annotateFileOverlaps(missioned.pullRequests, hydratedFilesMap);
             const hydratedSnapshot: SnapshotResponse = {
               ...persisted.snapshot,
-              pullRequests: missioned.pullRequests,
-              ciOutages: deriveCiOutages(missioned.pullRequests),
+              pullRequests: withOverlaps,
+              ciOutages: deriveCiOutages(withOverlaps),
               flakyChecks: flaked.flakyChecks,
               missions: missioned.missions,
             };
@@ -612,13 +630,79 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
       );
       const missioned = deriveMissions(flaked.pullRequests);
 
+      const MAX_PR_FILES_FETCH_PER_REFRESH = 25;
+      const cachedPrFiles: Record<string, CachedPrFilesEntry> = await deps.stateStore
+        .getPrFilesMap()
+        .catch(() => ({}));
+      const filesByKey = new Map<string, string[]>();
+      const uncachedFiles: PullFilesBatchItem[] = [];
+
+      // Prioritize non-draft PRs first when warming file lists
+      const prioritizedForFiles = [...missioned.pullRequests].sort((a, b) => {
+        if (a.isDraft !== b.isDraft) {
+          return a.isDraft ? 1 : -1;
+        }
+        return 0;
+      });
+      for (const pr of prioritizedForFiles) {
+        const cached = cachedPrFiles[pr.key];
+        if (cached && cached.headRefOid === pr.headRefOid) {
+          filesByKey.set(pr.key, cached.paths);
+          continue;
+        }
+        if (uncachedFiles.length < MAX_PR_FILES_FETCH_PER_REFRESH && pr.headRefOid) {
+          uncachedFiles.push({
+            key: pr.key,
+            owner: pr.owner,
+            repo: pr.repo,
+            number: pr.number,
+            headRefOid: pr.headRefOid,
+          });
+        }
+      }
+
+      if (uncachedFiles.length > 0 && deps.githubClient.fetchPullFilesBatch) {
+        try {
+          const fetchedFiles = await deps.githubClient.fetchPullFilesBatch(uncachedFiles);
+          if (fetchedFiles.rateLimit) {
+            lastGraphqlLimit = fetchedFiles.rateLimit;
+          }
+          const toPersist: Record<string, CachedPrFilesEntry> = {};
+          for (const item of uncachedFiles) {
+            const paths = fetchedFiles.filesByKey[item.key];
+            if (Array.isArray(paths)) {
+              filesByKey.set(item.key, paths);
+              toPersist[item.key] = {
+                headRefOid: item.headRefOid,
+                paths,
+              };
+            }
+          }
+          if (Object.keys(toPersist).length > 0) {
+            const openKeys = !isDegraded
+              ? new Set(missioned.pullRequests.map((p) => p.key))
+              : undefined;
+            await deps.stateStore.setPrFiles(toPersist, openKeys).catch(() => {
+              // Best-effort file-list cache persistence; ignore disk errors.
+            });
+          }
+        } catch (error) {
+          if (error instanceof GitHubAuthError) {
+            throw error;
+          }
+          // Best-effort blast-radius fetch; keep snapshot healthy on transient or rate-limit errors.
+        }
+      }
+
+      const withOverlaps = annotateFileOverlaps(missioned.pullRequests, filesByKey);
+
       const snapshot: SnapshotResponse = {
         fetchedAt: new Date(completedMs).toISOString(),
         viewer: { login: lastLogin },
         state: lifecycle === 'degraded' ? 'degraded' : 'ready',
-        counts: computeCounts(missioned.pullRequests),
-        pullRequests: missioned.pullRequests,
-        ciOutages: deriveCiOutages(missioned.pullRequests),
+        counts: computeCounts(withOverlaps),
+        pullRequests: withOverlaps,
+        ciOutages: deriveCiOutages(withOverlaps),
         flakyChecks: flaked.flakyChecks,
         missions: missioned.missions,
         rateLimit: {
