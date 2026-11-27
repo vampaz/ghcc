@@ -144,4 +144,16 @@ test('supports Cmd+K command palette, bulk actions (no merge), and saved filter 
   await bulkBar.getByRole('button', { name: /Sync behind \(2\)/i }).click();
   await expect.poll(() => syncedKeys.length).toBe(2);
   await expect(bulkBar).toContainText('2 succeeded');
+
+  // PR card trigger spans full card width and clicking the right side of the card opens the inspector sidebar
+  const firstCard = page.locator('.action-queue .pr-card').first();
+  const cardBox = await firstCard.boundingBox();
+  const triggerBox = await firstCard.locator('.pr-card-trigger').boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
+  expect(triggerBox!.width).toBeGreaterThan(cardBox!.width * 0.85);
+
+  await page.mouse.click(cardBox!.x + cardBox!.width * 0.82, cardBox!.y + 32);
+  await expect(page.locator('.inspector-dialog.open')).toBeVisible();
+  await expect(page.locator('.inspector-dialog')).toContainText('acme/core-api#101');
 });

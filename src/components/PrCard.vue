@@ -12,110 +12,112 @@
     }"
     :data-accent="edgeTone"
   >
-    <div class="pr-card-body">
-      <label class="pr-select-wrap" @click.stop>
-        <input
-          type="checkbox"
-          class="pr-select-checkbox"
-          :checked="isChecked"
-          :aria-label="`Select ${pr.key} for bulk action`"
-          @click="onCheckClick"
-        />
-      </label>
+    <div class="pr-card-body" @click="onCardBodyClick">
+      <div class="pr-card-main">
+        <label class="pr-select-wrap" @click.stop>
+          <input
+            type="checkbox"
+            class="pr-select-checkbox"
+            :checked="isChecked"
+            :aria-label="`Select ${pr.key} for bulk action`"
+            @click="onCheckClick"
+          />
+        </label>
 
-      <button
-        type="button"
-        class="pr-card-trigger"
-        :data-pr-key="pr.key"
-        :aria-expanded="isSelected"
-        @click="$emit('select', pr)"
-      >
-        <span class="pr-top-row">
-          <span class="pr-key mono-num">{{ pr.key }}</span>
-          <span class="pr-tags">
-            <span v-if="isPinned" class="tag" data-tone="blue">pinned</span>
-            <span v-if="isSnoozed" class="tag" data-tone="muted">{{ snoozeBadgeText }}</span>
+        <button
+          type="button"
+          class="pr-card-trigger"
+          :data-pr-key="pr.key"
+          :aria-expanded="isSelected"
+          @click="$emit('select', pr)"
+        >
+          <span class="pr-top-row">
+            <span class="pr-key mono-num">{{ pr.key }}</span>
+            <span class="pr-tags">
+              <span v-if="isPinned" class="tag" data-tone="blue">pinned</span>
+              <span v-if="isSnoozed" class="tag" data-tone="muted">{{ snoozeBadgeText }}</span>
+              <span
+                v-if="(pr.unresolvedThreadCount ?? 0) > 0"
+                class="tag mono-num"
+                data-tone="amber"
+                :title="`${pr.unresolvedThreadCount} unresolved review ${pr.unresolvedThreadCount === 1 ? 'thread' : 'threads'}`"
+              >
+                {{ pr.unresolvedThreadCount }} unresolved
+              </span>
+              <span v-if="!pr.sources.includes('authored')" class="tag" data-tone="muted">
+                @{{ pr.author }}
+              </span>
+              <span
+                v-if="pr.idleDays > 3"
+                class="tag"
+                data-tone="stale"
+                :title="`No commits for ${pr.idleDays} days`"
+              >
+                stale
+              </span>
+              <span v-if="reviewBadge" class="tag" data-tone="amber">{{ reviewBadge }}</span>
+              <span v-else-if="pr.bucket === 'ready'" class="tag" data-tone="ok">ready</span>
+              <span v-else-if="pr.mergeQueue" class="tag" data-tone="blue">
+                queue #{{ pr.mergeQueue.position }}
+              </span>
+              <span v-else-if="pr.autoMerge" class="tag" data-tone="blue">auto-merge</span>
+              <span v-else-if="pr.isDraft" class="tag" data-tone="muted">draft</span>
+
+              <span
+                v-if="pr.merge.state === 'unknown'"
+                class="tag mono-num"
+                data-tone="muted"
+                title="GitHub computes mergeability lazily; ghcc will re-probe within rate caps."
+              >
+                merge ?
+              </span>
+            </span>
+          </span>
+
+          <span class="pr-title">{{ pr.title }}</span>
+
+          <span class="pr-summary">{{ pr.blockerSummary }}</span>
+
+          <span v-if="pr.labels.length > 0" class="pr-labels-row">
             <span
-              v-if="(pr.unresolvedThreadCount ?? 0) > 0"
-              class="tag mono-num"
-              data-tone="amber"
-              :title="`${pr.unresolvedThreadCount} unresolved review ${pr.unresolvedThreadCount === 1 ? 'thread' : 'threads'}`"
+              v-for="label in pr.labels"
+              :key="label.name"
+              class="pr-label-pill"
+              :style="{ '--label-color': `#${label.color}` }"
+              :title="label.description ?? label.name"
             >
-              {{ pr.unresolvedThreadCount }} unresolved
-            </span>
-            <span v-if="!pr.sources.includes('authored')" class="tag" data-tone="muted">
-              @{{ pr.author }}
-            </span>
-            <span
-              v-if="pr.idleDays > 3"
-              class="tag"
-              data-tone="stale"
-              :title="`No commits for ${pr.idleDays} days`"
-            >
-              stale
-            </span>
-            <span v-if="reviewBadge" class="tag" data-tone="amber">{{ reviewBadge }}</span>
-            <span v-else-if="pr.bucket === 'ready'" class="tag" data-tone="ok">ready</span>
-            <span v-else-if="pr.mergeQueue" class="tag" data-tone="blue">
-              queue #{{ pr.mergeQueue.position }}
-            </span>
-            <span v-else-if="pr.autoMerge" class="tag" data-tone="blue">auto-merge</span>
-            <span v-else-if="pr.isDraft" class="tag" data-tone="muted">draft</span>
-
-            <span
-              v-if="pr.merge.state === 'unknown'"
-              class="tag mono-num"
-              data-tone="muted"
-              title="GitHub computes mergeability lazily; ghcc will re-probe within rate caps."
-            >
-              merge ?
-            </span>
-          </span>
-        </span>
-
-        <span class="pr-title">{{ pr.title }}</span>
-
-        <span class="pr-summary">{{ pr.blockerSummary }}</span>
-
-        <span v-if="pr.labels.length > 0" class="pr-labels-row">
-          <span
-            v-for="label in pr.labels"
-            :key="label.name"
-            class="pr-label-pill"
-            :style="{ '--label-color': `#${label.color}` }"
-            :title="label.description ?? label.name"
-          >
-            <span class="pr-label-dot" aria-hidden="true"></span>
-            <span>{{ label.name }}</span>
-          </span>
-        </span>
-
-        <span class="pr-metrics-row">
-          <span class="ci-mini" :title="ciTooltip">
-            <span class="ci-mini-track" aria-hidden="true">
-              <span class="ci-pass" :style="{ width: `${ciWidths.pass}%` }"></span>
-              <span class="ci-pend" :style="{ width: `${ciWidths.pend}%` }"></span>
-              <span class="ci-fail" :style="{ width: `${ciWidths.fail}%` }"></span>
-            </span>
-            <span v-if="pr.ci.hiddenCount > 0" class="ci-cap-note mono-num">
-              +{{ pr.ci.hiddenCount }}
+              <span class="pr-label-dot" aria-hidden="true"></span>
+              <span>{{ label.name }}</span>
             </span>
           </span>
 
-          <span class="diff-stats mono-num">
-            <span class="diff-add">+{{ pr.size.additions }}</span>
-            <span class="diff-del">−{{ pr.size.deletions }}</span>
-            <span class="diff-bar" aria-hidden="true">
-              <span class="diff-bar-add" :style="{ width: `${diffWidths.add}%` }"></span>
-              <span class="diff-bar-del" :style="{ width: `${diffWidths.del}%` }"></span>
+          <span class="pr-metrics-row">
+            <span class="ci-mini" :title="ciTooltip">
+              <span class="ci-mini-track" aria-hidden="true">
+                <span class="ci-pass" :style="{ width: `${ciWidths.pass}%` }"></span>
+                <span class="ci-pend" :style="{ width: `${ciWidths.pend}%` }"></span>
+                <span class="ci-fail" :style="{ width: `${ciWidths.fail}%` }"></span>
+              </span>
+              <span v-if="pr.ci.hiddenCount > 0" class="ci-cap-note mono-num">
+                +{{ pr.ci.hiddenCount }}
+              </span>
             </span>
-            <span class="diff-files">{{ pr.size.files }}f</span>
-            <span class="idle-age">{{
-              formatIdleCompact(pr.idleDays, pr.lastCommittedAt, nowMs)
-            }}</span>
+
+            <span class="diff-stats mono-num">
+              <span class="diff-add">+{{ pr.size.additions }}</span>
+              <span class="diff-del">−{{ pr.size.deletions }}</span>
+              <span class="diff-bar" aria-hidden="true">
+                <span class="diff-bar-add" :style="{ width: `${diffWidths.add}%` }"></span>
+                <span class="diff-bar-del" :style="{ width: `${diffWidths.del}%` }"></span>
+              </span>
+              <span class="diff-files">{{ pr.size.files }}f</span>
+              <span class="idle-age">{{
+                formatIdleCompact(pr.idleDays, pr.lastCommittedAt, nowMs)
+              }}</span>
+            </span>
           </span>
-        </span>
-      </button>
+        </button>
+      </div>
 
       <div class="pr-card-actions">
         <button
@@ -149,6 +151,8 @@
           @retry-load="$emit('retry-load-labels', $event)"
           @update-labels="(target, labels) => $emit('update-labels', target, labels)"
         />
+
+        <span class="pr-actions-spacer" aria-hidden="true"></span>
 
         <MergeControl
           v-if="!pr.isDraft"
@@ -325,6 +329,23 @@ const emit = defineEmits<{
 
 function onCheckClick(event: MouseEvent): void {
   emit('toggle-check', props.pr, event.shiftKey);
+}
+
+function onCardBodyClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement | null;
+  if (
+    !target ||
+    target.closest(
+      'button, a, input, label, select, textarea, [role="menu"], [role="menuitem"], [popover], .pr-select-wrap, .draft-toggle, .merge-control',
+    )
+  ) {
+    return;
+  }
+  const selection = typeof window !== 'undefined' ? window.getSelection()?.toString() : '';
+  if (selection && selection.length > 0) {
+    return;
+  }
+  emit('select', props.pr);
 }
 
 const isPinned = computed<boolean>(() => isPrPinned(props.pr));
@@ -527,7 +548,7 @@ const diffWidths = computed(() => {
   align-items: center;
   justify-content: flex-start;
   align-self: flex-start;
-  padding: 0.7rem 0 0 0.875rem;
+  padding: 0.78rem 0 0 0.75rem;
   flex: 0 0 auto;
   cursor: pointer;
 }
@@ -588,6 +609,15 @@ const diffWidths = computed(() => {
   flex-direction: column;
   align-items: stretch;
   gap: 0;
+  cursor: pointer;
+}
+
+.pr-card-main {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.15rem;
+  min-width: 0;
 }
 
 .pr-card-trigger {
@@ -597,7 +627,7 @@ const diffWidths = computed(() => {
   flex-direction: column;
   align-items: stretch;
   gap: 0.35rem;
-  padding: 0.75rem 0.875rem;
+  padding: 0.7rem 0.875rem 0.65rem 0.55rem;
   border: 0;
   background: transparent;
   color: inherit;
@@ -765,31 +795,15 @@ const diffWidths = computed(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.4rem;
-  padding: 0 0.875rem 0.625rem;
+  padding: 0.45rem 0.75rem 0.55rem;
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 65%, transparent);
 }
 
-@container (min-width: 28rem) {
-  .pr-card-body {
-    flex-direction: row;
-    align-items: flex-start;
-    gap: 0.375rem;
-  }
-
-  .pr-select-wrap {
-    padding: 0.78rem 0 0 0.65rem;
-  }
-
-  .pr-card-trigger {
-    padding: 0.75rem 0.5rem 0.75rem 0.875rem;
-  }
-
-  .pr-card-actions {
-    display: inline-flex;
-    padding: 0;
-    margin: 0.625rem 0.625rem 0 0;
-  }
+.pr-actions-spacer {
+  flex: 1 1 auto;
+  min-inline-size: 0;
 }
 
 .rerun-btn {

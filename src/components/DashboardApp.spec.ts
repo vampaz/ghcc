@@ -2543,4 +2543,46 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('opens the inspector when clicking anywhere on a PR card surface without double-triggering on buttons', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/presets') {
+        return new Response(JSON.stringify({ presets: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/pull/acme/core-api/101') {
+        return new Response(JSON.stringify(makeDetail()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(makeSnapshot()), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"card-click-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    const firstCard = wrapper.find('.action-queue .pr-card');
+    expect(wrapper.find('.inspector-dialog').classes()).not.toContain('open');
+
+    // Clicking the checkbox does NOT open the inspector
+    await firstCard.find('.pr-select-checkbox').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).not.toContain('open');
+
+    // Clicking non-button card surface (e.g. spacer in action bar) DOES open the inspector
+    await firstCard.find('.pr-actions-spacer').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+    expect(wrapper.find('.inspector-dialog').text()).toContain('acme/core-api#101');
+
+    wrapper.unmount();
+  });
 });
