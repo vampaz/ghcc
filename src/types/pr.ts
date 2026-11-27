@@ -242,3 +242,25 @@ export interface RerunFailedChecksResponse {
   jobId?: number;
   message: string;
 }
+
+export interface CheckAnnotation {
+  path: string;
+  startLine: number;
+  endLine: number;
+  level: 'failure' | 'warning' | 'notice';
+  title: string | null;
+  message: string;
+}
+
+export interface CheckSummaryResponse {
+  checkRunId: number;
+  name: string;
+  title: string | null;
+  summary: string | null;
+  annotations: CheckAnnotation[];
+  failedStep: string | null;
+  logExcerpt: string | null;
+  logTruncated: boolean;
+  logUnavailableReason: string | null;
+  detailsUrl: string | null;
+}

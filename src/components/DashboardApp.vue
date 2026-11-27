@@ -95,10 +95,12 @@
               :repo-labels-state="repoLabelsStates[pr.repository]"
               :label-state="labelStates[pr.key]"
               :rerun-state="rerunStates[pr.key]"
+              :check-summary-states="checkSummaryStates"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
               @rerun-checks="rerunPullChecks"
+              @load-check-summary="loadCheckSummary"
               @toggle-draft="togglePullDraft"
               @request-merge="openMergeConfirm"
               @load-labels="onLoadLabels"
@@ -136,10 +138,12 @@
                 :repo-labels-state="repoLabelsStates[pr.repository]"
                 :label-state="labelStates[pr.key]"
                 :rerun-state="rerunStates[pr.key]"
+                :check-summary-states="checkSummaryStates"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
                 @rerun-checks="rerunPullChecks"
+                @load-check-summary="loadCheckSummary"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -174,10 +178,12 @@
                 :repo-labels-state="repoLabelsStates[pr.repository]"
                 :label-state="labelStates[pr.key]"
                 :rerun-state="rerunStates[pr.key]"
+                :check-summary-states="checkSummaryStates"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
                 @rerun-checks="rerunPullChecks"
+                @load-check-summary="loadCheckSummary"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -220,10 +226,12 @@
       :repo-labels-state="selectedPr ? repoLabelsStates[selectedPr.repository] : undefined"
       :label-state="selectedPr ? labelStates[selectedPr.key] : undefined"
       :rerun-state="selectedPr ? rerunStates[selectedPr.key] : undefined"
+      :check-summary-states="checkSummaryStates"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
       @rerun-checks="rerunPullChecks"
+      @load-check-summary="loadCheckSummary"
       @toggle-draft="togglePullDraft"
       @request-merge="openMergeConfirm"
       @load-labels="onLoadLabels"
@@ -304,9 +312,11 @@ const {
   repoLabelsStates,
   labelStates,
   rerunStates,
+  checkSummaryStates,
   fetchSnapshot,
   syncPullRequest,
   rerunPullChecks,
+  loadCheckSummary,
   togglePullDraft,
   mergePullRequest,
   loadRepoLabels,

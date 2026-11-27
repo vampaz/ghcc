@@ -1,5 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import type {
+  CheckSummaryResponse,
   MergeMethod,
   MergePullResponse,
   PrDetailResponse,
@@ -96,6 +97,18 @@ export type PrRerunEvent =
   | { type: 'RESET' };
 
 export const IDLE_PR_RERUN_STATE: PrRerunState = { status: 'idle' };
+
+export type CheckSummaryState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; summary: CheckSummaryResponse }
+  | { status: 'error'; error: string };
+
+export const IDLE_CHECK_SUMMARY_STATE: CheckSummaryState = { status: 'idle' };
+
+export function checkSummaryKey(prKey: string, checkRunId: number): string {
+  return `${prKey}:${checkRunId}`;
+}
 
 export function transitionPrRerunState(current: PrRerunState, event: PrRerunEvent): PrRerunState {
   if (event.type === 'RESET') {
@@ -289,6 +302,7 @@ export function useDashboardState(
   const repoLabelsStates = ref<Record<string, RepoLabelsState>>({});
   const labelStates = ref<Record<string, PrLabelsState>>({});
   const rerunStates = ref<Record<string, PrRerunState>>({});
+  const checkSummaryStates = ref<Record<string, CheckSummaryState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -739,6 +753,7 @@ export function useDashboardState(
       }
       if (force) {
         detailCache.clear();
+        checkSummaryStates.value = {};
       }
       serverStillRefreshing =
         !force && !options.waitForServer && response.headers.get('x-ghcc-refreshing') === '1';
@@ -937,6 +952,51 @@ export function useDashboardState(
       );
       announcement.value = `Failed to re-run checks on ${pr.key}: ${message}`;
       return false;
+    }
+  }
+
+  async function loadCheckSummary(
+    pr: PrView,
+    checkRunId: number,
+    options: { isActionsJob?: boolean; force?: boolean } = {},
+  ): Promise<void> {
+    const key = checkSummaryKey(pr.key, checkRunId);
+    const existing = checkSummaryStates.value[key] ?? IDLE_CHECK_SUMMARY_STATE;
+    if (existing.status === 'loading') {
+      return;
+    }
+    if (!options.force && existing.status === 'ready') {
+      return;
+    }
+
+    checkSummaryStates.value = {
+      ...checkSummaryStates.value,
+      [key]: { status: 'loading' },
+    };
+
+    try {
+      const qs = options.isActionsJob ? '?actions=1' : '';
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/checks/${checkRunId}/summary${qs}`,
+        { headers: { Accept: 'application/json' } },
+      );
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to load check summary (HTTP ${response.status})`);
+      }
+      const summary = (await response.json()) as CheckSummaryResponse;
+      checkSummaryStates.value = {
+        ...checkSummaryStates.value,
+        [key]: { status: 'ready', summary },
+      };
+    } catch (error) {
+      checkSummaryStates.value = {
+        ...checkSummaryStates.value,
+        [key]: {
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Failed to load check summary',
+        },
+      };
     }
   }
 
@@ -1293,9 +1353,11 @@ export function useDashboardState(
     repoLabelsStates,
     labelStates,
     rerunStates,
+    checkSummaryStates,
     fetchSnapshot,
     syncPullRequest,
     rerunPullChecks,
+    loadCheckSummary,
     togglePullDraft,
     mergePullRequest,
     loadRepoLabels,

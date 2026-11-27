@@ -214,52 +214,188 @@
               <li
                 v-for="(item, idx) in group.items"
                 :key="`${item.check.kind}-${item.check.name}-${idx}`"
-                class="detail-row"
+                class="detail-row detail-check-item"
               >
-                <span class="check-badge" :data-bucket="item.check.bucket">{{
-                  item.check.bucket
-                }}</span>
-                <span
-                  class="detail-name"
-                  :title="item.displayName !== item.check.name ? item.check.name : undefined"
+                <div class="detail-row-main">
+                  <span class="check-badge" :data-bucket="item.check.bucket">{{
+                    item.check.bucket
+                  }}</span>
+                  <span
+                    class="detail-name"
+                    :title="item.displayName !== item.check.name ? item.check.name : undefined"
+                  >
+                    {{ item.displayName }}
+                  </span>
+                  <span
+                    v-if="
+                      hasInlineSummary(item.check) || isRerunnableJob(item.check) || item.check.url
+                    "
+                    class="detail-row-actions"
+                  >
+                    <button
+                      v-if="hasInlineSummary(item.check)"
+                      type="button"
+                      class="check-logs-btn"
+                      :class="{ expanded: isCheckExpanded(item.check.checkRunId!) }"
+                      :aria-expanded="isCheckExpanded(item.check.checkRunId!) ? 'true' : 'false'"
+                      :aria-label="`${isCheckExpanded(item.check.checkRunId!) ? 'Hide' : 'Show'} failure output for ${item.check.name}`"
+                      @click="toggleCheckSummary(item.check)"
+                    >
+                      <CarbonIcon name="terminal" :size="12" />
+                      <span>{{ isRerunnableJob(item.check) ? 'Logs' : 'Output' }}</span>
+                    </button>
+                    <button
+                      v-if="isRerunnableJob(item.check)"
+                      type="button"
+                      class="check-rerun-btn"
+                      :class="{
+                        queued: isJobQueued(item.check.checkRunId!),
+                        rerunning: isJobRerunning(item.check.checkRunId!),
+                      }"
+                      :aria-disabled="
+                        isJobButtonDisabled(item.check.checkRunId!) ? 'true' : undefined
+                      "
+                      :aria-label="`Re-run ${item.check.name}`"
+                      :title="`Re-run job ${item.check.name}`"
+                      @click="onRerunJobClick(item.check.checkRunId!)"
+                    >
+                      <progress
+                        v-if="isJobRerunning(item.check.checkRunId!)"
+                        class="loading-spinner"
+                        aria-label="Re-running job"
+                      ></progress>
+                      <CarbonIcon
+                        v-else
+                        :name="isJobQueued(item.check.checkRunId!) ? 'checkmark' : 'renew'"
+                        :size="12"
+                      />
+                      <span>{{ jobRerunLabel(item.check.checkRunId!) }}</span>
+                    </button>
+                    <a
+                      v-if="item.check.url"
+                      :href="item.check.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="detail-link"
+                    >
+                      <span>details</span>
+                      <CarbonIcon name="launch" :size="12" />
+                    </a>
+                  </span>
+                </div>
+
+                <div
+                  v-if="hasInlineSummary(item.check) && isCheckExpanded(item.check.checkRunId!)"
+                  class="check-summary-panel"
                 >
-                  {{ item.displayName }}
-                </span>
-                <button
-                  v-if="isRerunnableJob(item.check)"
-                  type="button"
-                  class="check-rerun-btn"
-                  :class="{
-                    queued: isJobQueued(item.check.checkRunId!),
-                    rerunning: isJobRerunning(item.check.checkRunId!),
-                  }"
-                  :aria-disabled="isJobButtonDisabled(item.check.checkRunId!) ? 'true' : undefined"
-                  :aria-label="`Re-run ${item.check.name}`"
-                  :title="`Re-run job ${item.check.name}`"
-                  @click="onRerunJobClick(item.check.checkRunId!)"
-                >
-                  <progress
-                    v-if="isJobRerunning(item.check.checkRunId!)"
-                    class="loading-spinner"
-                    aria-label="Re-running job"
-                  ></progress>
-                  <CarbonIcon
-                    v-else
-                    :name="isJobQueued(item.check.checkRunId!) ? 'checkmark' : 'renew'"
-                    :size="12"
-                  />
-                  <span>{{ jobRerunLabel(item.check.checkRunId!) }}</span>
-                </button>
-                <a
-                  v-if="item.check.url"
-                  :href="item.check.url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="detail-link"
-                >
-                  <span>details</span>
-                  <CarbonIcon name="launch" :size="12" />
-                </a>
+                  <template
+                    v-for="state in [getCheckSummaryState(item.check.checkRunId!)]"
+                    :key="item.check.checkRunId!"
+                  >
+                    <div v-if="state.status === 'loading'" class="check-summary-loading">
+                      Loading failure output...
+                    </div>
+
+                    <div
+                      v-else-if="state.status === 'error'"
+                      class="check-summary-error"
+                      role="alert"
+                    >
+                      <span>{{ state.error }}</span>
+                      <button
+                        type="button"
+                        class="check-summary-retry-btn"
+                        @click="retryCheckSummary(item.check)"
+                      >
+                        Retry
+                      </button>
+                    </div>
+
+                    <div v-else-if="state.status === 'ready'" class="check-summary-ready">
+                      <div v-if="state.summary.failedStep" class="check-failed-step">
+                        <span class="check-failed-step-label">Failed step</span>
+                        <span class="mono-num check-failed-step-name">{{
+                          state.summary.failedStep
+                        }}</span>
+                      </div>
+
+                      <div
+                        v-if="state.summary.title || state.summary.summary"
+                        class="check-output-meta"
+                      >
+                        <p v-if="state.summary.title" class="check-output-title">
+                          {{ state.summary.title }}
+                        </p>
+                        <p v-if="state.summary.summary" class="check-output-summary">
+                          {{ state.summary.summary }}
+                        </p>
+                      </div>
+
+                      <ul
+                        v-if="state.summary.annotations.length > 0"
+                        role="list"
+                        class="check-annotations-list"
+                      >
+                        <li
+                          v-for="(ann, annIdx) in state.summary.annotations"
+                          :key="`${ann.path}-${ann.startLine}-${annIdx}`"
+                          class="check-annotation-item"
+                        >
+                          <div class="check-annotation-head">
+                            <span class="check-annotation-level" :data-level="ann.level">{{
+                              ann.level
+                            }}</span>
+                            <span v-if="ann.path" class="check-annotation-path mono-num">
+                              {{ formatAnnotationLocation(ann) }}
+                            </span>
+                            <span v-if="ann.title" class="check-annotation-title">{{
+                              ann.title
+                            }}</span>
+                          </div>
+                          <p class="check-annotation-message">{{ ann.message }}</p>
+                        </li>
+                      </ul>
+
+                      <div v-if="state.summary.logExcerpt" class="check-log-block">
+                        <div class="check-log-toolbar">
+                          <span class="check-log-label">
+                            Log excerpt
+                            <template v-if="state.summary.logTruncated"> (tail)</template>
+                          </span>
+                          <button
+                            type="button"
+                            class="check-log-copy-btn"
+                            @click="
+                              copyLogExcerpt(item.check.checkRunId!, state.summary.logExcerpt)
+                            "
+                          >
+                            {{ copiedCheckId === item.check.checkRunId ? 'Copied' : 'Copy' }}
+                          </button>
+                        </div>
+                        <pre
+                          class="check-log-pre app-scroll"
+                        ><code>{{ state.summary.logExcerpt }}</code></pre>
+                      </div>
+
+                      <p v-if="state.summary.logUnavailableReason" class="check-summary-note">
+                        {{ state.summary.logUnavailableReason }}
+                      </p>
+
+                      <p
+                        v-if="
+                          !state.summary.title &&
+                          !state.summary.summary &&
+                          state.summary.annotations.length === 0 &&
+                          !state.summary.logExcerpt &&
+                          !state.summary.logUnavailableReason
+                        "
+                        class="check-summary-note"
+                      >
+                        No failure output or annotations were reported for this check.
+                      </p>
+                    </div>
+                  </template>
+                </div>
               </li>
             </ul>
           </details>
@@ -307,19 +443,22 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId, watch } from 'vue';
+import { computed, onUnmounted, ref, useId, watch } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
 import DraftToggle from '@/components/DraftToggle.vue';
 import LabelPicker from '@/components/LabelPicker.vue';
 import MergeControl from '@/components/MergeControl.vue';
 import PrMarkdownBody from '@/components/PrMarkdownBody.vue';
 import {
+  checkSummaryKey,
+  IDLE_CHECK_SUMMARY_STATE,
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
   IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_REPO_LABELS_STATE,
+  type CheckSummaryState,
   type InspectorState,
   type PrDraftState,
   type PrLabelsState,
@@ -329,7 +468,7 @@ import {
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
-import type { MergeMethod, PrDetailCheck, PrView } from '@/types/pr';
+import type { CheckAnnotation, MergeMethod, PrDetailCheck, PrView } from '@/types/pr';
 import { type CheckGroup, groupDetailChecks } from '@/utils/check-groups';
 import { formatRelativeAge } from '@/utils/format';
 
@@ -344,6 +483,7 @@ interface Props {
   repoLabelsState?: RepoLabelsState;
   labelState?: PrLabelsState;
   rerunState?: PrRerunState;
+  checkSummaryStates?: Record<string, CheckSummaryState>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -354,12 +494,18 @@ const props = withDefaults(defineProps<Props>(), {
   repoLabelsState: () => IDLE_REPO_LABELS_STATE,
   labelState: () => IDLE_PR_LABELS_STATE,
   rerunState: () => IDLE_PR_RERUN_STATE,
+  checkSummaryStates: () => ({}),
 });
 
 const emit = defineEmits<{
   retry: [pr: PrView];
   sync: [pr: PrView];
   'rerun-checks': [pr: PrView, options?: { jobId?: number; runId?: number }];
+  'load-check-summary': [
+    pr: PrView,
+    checkRunId: number,
+    options?: { isActionsJob?: boolean; force?: boolean },
+  ];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
   'load-labels': [pr: PrView];
@@ -533,6 +679,106 @@ function onRerunJobClick(jobId: number): void {
     return;
   }
   emit('rerun-checks', props.pr, { jobId });
+}
+
+const expandedCheckIds = ref<Set<number>>(new Set());
+const copiedCheckId = ref<number | null>(null);
+let copiedTimer: number | null = null;
+
+watch(
+  () => props.pr?.key ?? null,
+  () => {
+    expandedCheckIds.value = new Set();
+    copiedCheckId.value = null;
+  },
+);
+
+onUnmounted(() => {
+  if (typeof window !== 'undefined' && copiedTimer !== null) {
+    window.clearTimeout(copiedTimer);
+    copiedTimer = null;
+  }
+});
+
+function hasInlineSummary(check: PrDetailCheck): boolean {
+  return (
+    Boolean(props.pr) &&
+    check.kind === 'CheckRun' &&
+    check.bucket === 'failing' &&
+    typeof check.checkRunId === 'number'
+  );
+}
+
+function isCheckExpanded(checkRunId: number): boolean {
+  return expandedCheckIds.value.has(checkRunId);
+}
+
+function getCheckSummaryState(checkRunId: number): CheckSummaryState {
+  if (!props.pr) {
+    return IDLE_CHECK_SUMMARY_STATE;
+  }
+  return (
+    props.checkSummaryStates[checkSummaryKey(props.pr.key, checkRunId)] ?? IDLE_CHECK_SUMMARY_STATE
+  );
+}
+
+function toggleCheckSummary(check: PrDetailCheck): void {
+  if (!props.pr || typeof check.checkRunId !== 'number') {
+    return;
+  }
+  const next = new Set(expandedCheckIds.value);
+  if (next.has(check.checkRunId)) {
+    next.delete(check.checkRunId);
+  } else {
+    next.add(check.checkRunId);
+    emit('load-check-summary', props.pr, check.checkRunId, {
+      isActionsJob: typeof check.workflowRunId === 'number',
+    });
+  }
+  expandedCheckIds.value = next;
+}
+
+function retryCheckSummary(check: PrDetailCheck): void {
+  if (!props.pr || typeof check.checkRunId !== 'number') {
+    return;
+  }
+  emit('load-check-summary', props.pr, check.checkRunId, {
+    isActionsJob: typeof check.workflowRunId === 'number',
+    force: true,
+  });
+}
+
+function formatAnnotationLocation(ann: CheckAnnotation): string {
+  if (!ann.startLine) {
+    return ann.path;
+  }
+  if (ann.endLine && ann.endLine !== ann.startLine) {
+    return `${ann.path}:${ann.startLine}-${ann.endLine}`;
+  }
+  return `${ann.path}:${ann.startLine}`;
+}
+
+async function copyLogExcerpt(checkRunId: number, text: string): Promise<void> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    copiedCheckId.value = checkRunId;
+    if (typeof window !== 'undefined') {
+      if (copiedTimer !== null) {
+        window.clearTimeout(copiedTimer);
+      }
+      copiedTimer = window.setTimeout(() => {
+        copiedTimer = null;
+        if (copiedCheckId.value === checkRunId) {
+          copiedCheckId.value = null;
+        }
+      }, 2_000);
+    }
+  } catch {
+    // Ignore clipboard rejection in restricted contexts.
+  }
 }
 </script>
 
@@ -951,6 +1197,251 @@ function onRerunJobClick(jobId: number): void {
   border-radius: 0.35rem;
   background-color: var(--bg-surface-muted);
   font-size: 0.8rem;
+}
+
+.detail-check-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+}
+
+.detail-row-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+  min-width: 0;
+}
+
+.detail-row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-inline-start: auto;
+}
+
+.check-logs-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-block-size: 1.5rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.check-logs-btn:hover,
+.check-logs-btn.expanded {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+}
+
+.check-summary-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.check-summary-loading,
+.check-summary-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--ink-secondary);
+}
+
+.check-summary-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.35rem;
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  font-size: 0.75rem;
+}
+
+.check-summary-retry-btn,
+.check-log-copy-btn {
+  min-block-size: 1.45rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-primary);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.check-summary-ready {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.check-failed-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.74rem;
+}
+
+.check-failed-step-label {
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.25rem;
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  font-weight: 700;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.check-failed-step-name {
+  color: var(--ink-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.check-output-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.check-output-title {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+.check-output-summary {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--ink-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.check-annotations-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.check-annotation-item {
+  padding: 0.35rem 0.45rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.check-annotation-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+}
+
+.check-annotation-level {
+  padding: 0.04rem 0.3rem;
+  border-radius: 0.2rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-secondary);
+}
+
+.check-annotation-level[data-level='failure'] {
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+}
+
+.check-annotation-level[data-level='warning'] {
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+}
+
+.check-annotation-path {
+  color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.check-annotation-title {
+  color: var(--ink-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.check-annotation-message {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ink-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.check-log-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.check-log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.check-log-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+.check-log-pre {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  max-block-size: 16rem;
+  overflow: auto;
+  border-radius: 0.35rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
+  color: var(--ink-primary);
+  font-family: var(--font-mono);
+  font-size: 0.71rem;
+  line-height: 1.45;
+  white-space: pre;
 }
 
 .check-badge,

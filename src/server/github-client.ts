@@ -1,8 +1,15 @@
 import type { TokenStore } from '@/server/auth';
+import {
+  extractLogExcerpt,
+  isSafeLogRedirectUrl,
+  readBoundedLogTail,
+} from '@/server/ci-log-excerpt';
 import type { RawPullRequest } from '@/server/derive/types';
 import { redactToken, sanitizeErrorMessage } from '@/server/redact';
 import { sanitizePrBodyHtml } from '@/server/sanitize-pr-html';
 import type {
+  CheckAnnotation,
+  CheckSummaryResponse,
   MergeMethod,
   MergePullResponse,
   PrDetailCheck,
@@ -610,6 +617,12 @@ export interface GitHubClient {
     number: number,
     options?: { expectedHeadSha?: string; jobId?: number; runId?: number },
   ): Promise<RerunFailedChecksResponse>;
+  fetchCheckSummary(
+    owner: string,
+    repo: string,
+    checkRunId: number,
+    options?: { isActionsJob?: boolean },
+  ): Promise<CheckSummaryResponse>;
   invalidatePullDetailCache?(owner?: string, repo?: string, number?: number): void;
 }
 
@@ -919,6 +932,8 @@ function mapActionsError(
 
 const PULL_DETAIL_CACHE_TTL_MS = 30_000;
 const REPO_LABELS_CACHE_TTL_MS = 5 * 60_000;
+const CHECK_SUMMARY_CACHE_TTL_MS = 10 * 60_000;
+const CHECK_SUMMARY_CACHE_MAX = 50;
 const DEFAULT_REPO_PULLS_PAGE_SIZE = 12;
 const MIN_REPO_PULLS_PAGE_SIZE = 6;
 const TRANSIENT_GRAPHQL_RE =
@@ -942,6 +957,22 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
   const pullDetailInFlight = new Map<string, Promise<PrDetailResponse>>();
   const repoLabelsCache = new Map<string, { fetchedAtMs: number; value: PrLabel[] }>();
   const repoLabelsInFlight = new Map<string, Promise<PrLabel[]>>();
+  const checkSummaryCache = new Map<string, { fetchedAtMs: number; value: CheckSummaryResponse }>();
+  const checkSummaryInFlight = new Map<string, Promise<CheckSummaryResponse>>();
+
+  function setCachedCheckSummary(cacheKey: string, value: CheckSummaryResponse): void {
+    if (checkSummaryCache.has(cacheKey)) {
+      checkSummaryCache.delete(cacheKey);
+    }
+    checkSummaryCache.set(cacheKey, { fetchedAtMs: now(), value });
+    while (checkSummaryCache.size > CHECK_SUMMARY_CACHE_MAX) {
+      const oldestKey = checkSummaryCache.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      checkSummaryCache.delete(oldestKey);
+    }
+  }
 
   function invalidatePullDetailCache(owner?: string, repo?: string, number?: number): void {
     if (owner === undefined || repo === undefined || number === undefined) {
@@ -2289,6 +2320,277 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
         runIds: succeededRunIds,
         message: `Re-run requested for ${succeededRunIds.length} failed ${runWord}${partialNote}.`,
       };
+    },
+
+    async fetchCheckSummary(
+      owner: string,
+      repo: string,
+      checkRunId: number,
+      options: { isActionsJob?: boolean } = {},
+    ): Promise<CheckSummaryResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeCheckRunId = validatePositiveIntId(checkRunId, 'checkRunId');
+      const cacheKey = `${safeOwner}/${safeRepo}:${safeCheckRunId}`;
+
+      const cached = checkSummaryCache.get(cacheKey);
+      if (cached && now() - cached.fetchedAtMs < CHECK_SUMMARY_CACHE_TTL_MS) {
+        return cached.value;
+      }
+      const existingFlight = checkSummaryInFlight.get(cacheKey);
+      if (existingFlight) {
+        return existingFlight;
+      }
+
+      const loadPromise = (async (): Promise<CheckSummaryResponse> => {
+        const token = await deps.tokenStore.getToken();
+        const restHeaders = {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': 'ghcc/0.1',
+        };
+        const repoBase = `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}`;
+
+        let runResponse: Response;
+        try {
+          runResponse = await fetchFn(`${repoBase}/check-runs/${safeCheckRunId}`, {
+            method: 'GET',
+            headers: restHeaders,
+          });
+        } catch (error) {
+          throw new GitHubApiError(
+            `Network error loading check run: ${sanitizeErrorMessage(error, token)}`,
+            502,
+          );
+        }
+
+        if (!runResponse.ok) {
+          const rawText = await runResponse.text().catch(() => '');
+          throw mapActionsError(runResponse, rawText, token, now(), `Check run ${safeCheckRunId}`);
+        }
+
+        const runPayload = (await runResponse.json()) as {
+          name?: unknown;
+          status?: unknown;
+          html_url?: unknown;
+          details_url?: unknown;
+          app?: { slug?: unknown } | null;
+          output?: {
+            title?: unknown;
+            summary?: unknown;
+            text?: unknown;
+            annotations_count?: unknown;
+          } | null;
+        };
+
+        const name =
+          typeof runPayload?.name === 'string' && runPayload.name.trim().length > 0
+            ? runPayload.name.trim()
+            : `check-${safeCheckRunId}`;
+        const rawTitle =
+          typeof runPayload?.output?.title === 'string' && runPayload.output.title.trim().length > 0
+            ? redactToken(runPayload.output.title.trim(), token)
+            : null;
+        const rawSummary =
+          typeof runPayload?.output?.summary === 'string' &&
+          runPayload.output.summary.trim().length > 0
+            ? redactToken(runPayload.output.summary.trim(), token).slice(0, 1200)
+            : null;
+        const rawOutputText =
+          typeof runPayload?.output?.text === 'string' && runPayload.output.text.trim().length > 0
+            ? runPayload.output.text.trim()
+            : null;
+        const detailsUrl =
+          typeof runPayload?.html_url === 'string'
+            ? runPayload.html_url
+            : typeof runPayload?.details_url === 'string'
+              ? runPayload.details_url
+              : null;
+        const annotationsCount =
+          typeof runPayload?.output?.annotations_count === 'number'
+            ? runPayload.output.annotations_count
+            : 0;
+        const isCompleted =
+          typeof runPayload?.status === 'string' && runPayload.status.toLowerCase() === 'completed';
+
+        const annotations: CheckAnnotation[] = [];
+        if (annotationsCount > 0) {
+          try {
+            const annResponse = await fetchFn(
+              `${repoBase}/check-runs/${safeCheckRunId}/annotations?per_page=25`,
+              { method: 'GET', headers: restHeaders },
+            );
+            if (annResponse.ok) {
+              const annPayload = (await annResponse.json()) as Array<{
+                path?: unknown;
+                start_line?: unknown;
+                end_line?: unknown;
+                annotation_level?: unknown;
+                title?: unknown;
+                message?: unknown;
+              }>;
+              if (Array.isArray(annPayload)) {
+                for (const item of annPayload) {
+                  if (typeof item?.message !== 'string' || item.message.trim().length === 0) {
+                    continue;
+                  }
+                  const rawLevel =
+                    typeof item.annotation_level === 'string'
+                      ? item.annotation_level.toLowerCase()
+                      : 'notice';
+                  const level: CheckAnnotation['level'] =
+                    rawLevel === 'failure'
+                      ? 'failure'
+                      : rawLevel === 'warning'
+                        ? 'warning'
+                        : 'notice';
+                  const startLine =
+                    typeof item.start_line === 'number' && Number.isFinite(item.start_line)
+                      ? item.start_line
+                      : 0;
+                  const endLine =
+                    typeof item.end_line === 'number' && Number.isFinite(item.end_line)
+                      ? item.end_line
+                      : startLine;
+                  annotations.push({
+                    path: typeof item.path === 'string' ? item.path : '',
+                    startLine,
+                    endLine,
+                    level,
+                    title:
+                      typeof item.title === 'string' && item.title.trim().length > 0
+                        ? redactToken(item.title.trim(), token)
+                        : null,
+                    message: redactToken(item.message.trim(), token),
+                  });
+                }
+              }
+            }
+          } catch {
+            // Annotations are supplemental; proceed with check output and logs.
+          }
+        }
+
+        const isActionsJob =
+          Boolean(options.isActionsJob) || runPayload?.app?.slug === 'github-actions';
+
+        let failedStep: string | null = null;
+        let logExcerpt: string | null = null;
+        let logTruncated = false;
+        let logUnavailableReason: string | null = null;
+
+        if (isActionsJob) {
+          try {
+            const logInitRes = await fetchFn(`${repoBase}/actions/jobs/${safeCheckRunId}/logs`, {
+              method: 'GET',
+              headers: restHeaders,
+              redirect: 'manual',
+            });
+
+            if (logInitRes.status === 401) {
+              throw new GitHubAuthError(
+                'GitHub rejected token reading job logs (401 Unauthorized)',
+              );
+            }
+
+            if (logInitRes.status === 403 || logInitRes.status === 429) {
+              const coreRateLimit = parseRateLimitHeaders(logInitRes.headers);
+              const isRateLimit =
+                logInitRes.status === 429 ||
+                coreRateLimit?.remaining === 0 ||
+                logInitRes.headers.has('retry-after');
+              if (isRateLimit) {
+                throw new GitHubRateLimitError(
+                  `GitHub REST rate limit exceeded (HTTP ${logInitRes.status})`,
+                  parseResetAtFromResponse(logInitRes.headers, now()),
+                );
+              }
+              logUnavailableReason =
+                'GitHub token does not have permission to read Actions job logs.';
+            } else if (logInitRes.status === 404 || logInitRes.status === 410) {
+              logUnavailableReason = 'Job logs are not available or have expired.';
+            } else if (
+              logInitRes.status === 301 ||
+              logInitRes.status === 302 ||
+              logInitRes.status === 303 ||
+              logInitRes.status === 307 ||
+              logInitRes.status === 308
+            ) {
+              const location = logInitRes.headers.get('location');
+              if (!location || !isSafeLogRedirectUrl(location)) {
+                logUnavailableReason = 'Blocked unexpected log redirect destination.';
+              } else {
+                // Never forward Authorization or Cookie headers to redirected blob storage.
+                const blobRes = await fetchFn(location, {
+                  method: 'GET',
+                  headers: {
+                    Accept: 'text/plain',
+                    'User-Agent': 'ghcc/0.1',
+                  },
+                  redirect: 'error',
+                });
+                if (blobRes.ok) {
+                  const { text, truncated } = await readBoundedLogTail(blobRes);
+                  const extracted = extractLogExcerpt(text, { inputWasTruncated: truncated });
+                  failedStep = extracted.failedStep
+                    ? redactToken(extracted.failedStep, token)
+                    : null;
+                  logExcerpt = extracted.excerpt ? redactToken(extracted.excerpt, token) : null;
+                  logTruncated = extracted.truncated;
+                } else {
+                  logUnavailableReason = `Failed to download job log (HTTP ${blobRes.status}).`;
+                }
+              }
+            } else if (logInitRes.ok) {
+              const { text, truncated } = await readBoundedLogTail(logInitRes);
+              const extracted = extractLogExcerpt(text, { inputWasTruncated: truncated });
+              failedStep = extracted.failedStep ? redactToken(extracted.failedStep, token) : null;
+              logExcerpt = extracted.excerpt ? redactToken(extracted.excerpt, token) : null;
+              logTruncated = extracted.truncated;
+            } else {
+              logUnavailableReason = `Job logs unavailable (HTTP ${logInitRes.status}).`;
+            }
+          } catch (error) {
+            if (error instanceof GitHubAuthError || error instanceof GitHubRateLimitError) {
+              throw error;
+            }
+            logUnavailableReason = `Unable to fetch job logs: ${sanitizeErrorMessage(error, token)}`;
+          }
+        } else if (rawOutputText) {
+          const extracted = extractLogExcerpt(rawOutputText);
+          logExcerpt = extracted.excerpt ? redactToken(extracted.excerpt, token) : null;
+          logTruncated = extracted.truncated;
+        } else if (!rawTitle && !rawSummary && annotations.length === 0) {
+          logUnavailableReason =
+            'Inline logs are only available for GitHub Actions jobs. Open details on GitHub to inspect.';
+        }
+
+        const result: CheckSummaryResponse = {
+          checkRunId: safeCheckRunId,
+          name,
+          title: rawTitle,
+          summary: rawSummary,
+          annotations,
+          failedStep,
+          logExcerpt,
+          logTruncated,
+          logUnavailableReason,
+          detailsUrl,
+        };
+
+        if (isCompleted) {
+          setCachedCheckSummary(cacheKey, result);
+        }
+        return result;
+      })();
+
+      checkSummaryInFlight.set(cacheKey, loadPromise);
+      try {
+        return await loadPromise;
+      } finally {
+        checkSummaryInFlight.delete(cacheKey);
+      }
     },
   };
 }

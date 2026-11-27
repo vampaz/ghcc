@@ -44,9 +44,13 @@
         :repo-labels-state="repoLabelsState"
         :label-state="labelState"
         :rerun-state="rerunState"
+        :check-summary-states="checkSummaryStates"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
+        @load-check-summary="
+          (target, checkRunId, options) => $emit('load-check-summary', target, checkRunId, options)
+        "
         @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
         @request-merge="(target, method) => $emit('request-merge', target, method)"
         @load-labels="$emit('load-labels', $event)"
@@ -83,9 +87,13 @@
       :repo-labels-state="repoLabelsState"
       :label-state="labelState"
       :rerun-state="rerunState"
+      :check-summary-states="checkSummaryStates"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
+      @load-check-summary="
+        (target, checkRunId, options) => $emit('load-check-summary', target, checkRunId, options)
+      "
       @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
       @request-merge="(target, method) => $emit('request-merge', target, method)"
       @load-labels="$emit('load-labels', $event)"
@@ -107,6 +115,7 @@ import {
   IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_REPO_LABELS_STATE,
+  type CheckSummaryState,
   type InspectorState,
   type PrDraftState,
   type PrLabelsState,
@@ -130,6 +139,7 @@ interface Props {
   repoLabelsState?: RepoLabelsState;
   labelState?: PrLabelsState;
   rerunState?: PrRerunState;
+  checkSummaryStates?: Record<string, CheckSummaryState>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -140,6 +150,7 @@ const props = withDefaults(defineProps<Props>(), {
   repoLabelsState: () => IDLE_REPO_LABELS_STATE,
   labelState: () => IDLE_PR_LABELS_STATE,
   rerunState: () => IDLE_PR_RERUN_STATE,
+  checkSummaryStates: () => ({}),
 });
 
 defineEmits<{
@@ -147,6 +158,11 @@ defineEmits<{
   retry: [pr: PrView];
   sync: [pr: PrView];
   'rerun-checks': [pr: PrView, options?: { jobId?: number; runId?: number }];
+  'load-check-summary': [
+    pr: PrView,
+    checkRunId: number,
+    options?: { isActionsJob?: boolean; force?: boolean },
+  ];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
   'load-labels': [pr: PrView];

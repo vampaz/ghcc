@@ -99,6 +99,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({
@@ -181,6 +182,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
       invalidatePullDetailCache,
     };
 
@@ -263,6 +265,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({
@@ -330,6 +333,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({
@@ -387,6 +391,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({
@@ -481,6 +486,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({
@@ -550,6 +556,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service1 = createSnapshotService({
@@ -651,6 +658,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({
@@ -771,6 +779,7 @@ describe('snapshot-service & state machine', () => {
       fetchRepoLabels: vi.fn<GitHubClient['fetchRepoLabels']>(),
       setPullLabels: vi.fn<GitHubClient['setPullLabels']>(),
       rerunFailedChecks: vi.fn<GitHubClient['rerunFailedChecks']>(),
+      fetchCheckSummary: vi.fn<GitHubClient['fetchCheckSummary']>(),
     };
 
     const service = createSnapshotService({

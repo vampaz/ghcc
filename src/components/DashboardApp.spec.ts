@@ -1998,4 +1998,129 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('loads inline CI failure logs and annotations on demand when expanding a failing check', async () => {
+    let summaryFetchCount = 0;
+    let failFirstSummary = true;
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+
+      if (url === '/api/pull/acme/core-api/101/checks/55501/summary?actions=1') {
+        summaryFetchCount++;
+        if (failFirstSummary) {
+          failFirstSummary = false;
+          return new Response(JSON.stringify({ error: 'Temporary GitHub 502' }), {
+            status: 502,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            checkRunId: 55501,
+            name: 'unit-tests',
+            title: '1 spec failed',
+            summary: 'Retry test timed out',
+            annotations: [
+              {
+                path: 'src/retry.spec.ts',
+                startLine: 18,
+                endLine: 18,
+                level: 'failure',
+                title: 'Timeout',
+                message: 'Exceeded 5000ms',
+              },
+            ],
+            failedStep: 'Run npm run test',
+            logExcerpt: 'FAIL src/retry.spec.ts\n##[error]Process completed with exit code 1.',
+            logTruncated: true,
+            logUnavailableReason: null,
+            detailsUrl: 'https://github.com/acme/core-api/runs/55501',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      if (url === '/api/pull/acme/core-api/101') {
+        const detail: PrDetailResponse = {
+          ...makeDetail(),
+          checksTotalCount: 2,
+          checks: [
+            {
+              name: 'unit-tests',
+              kind: 'CheckRun',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              bucket: 'failing',
+              url: 'https://github.com/acme/core-api/actions/runs/9001',
+              description: null,
+              startedAt: '2026-11-24T10:00:00.000Z',
+              completedAt: '2026-11-24T10:05:00.000Z',
+              checkRunId: 55501,
+              workflowRunId: 9001,
+            },
+            {
+              name: 'lint',
+              kind: 'CheckRun',
+              status: 'COMPLETED',
+              conclusion: 'SUCCESS',
+              bucket: 'passing',
+              url: 'https://github.com/acme/core-api/actions/runs/9001',
+              description: null,
+              startedAt: '2026-11-24T10:00:00.000Z',
+              completedAt: '2026-11-24T10:02:00.000Z',
+              checkRunId: 55502,
+              workflowRunId: 9001,
+            },
+          ],
+        };
+        return new Response(JSON.stringify(detail), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify(makeSnapshot()), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"summary-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Opening inspector does NOT eagerly fetch check summary
+    await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    expect(summaryFetchCount).toBe(0);
+
+    const inspector = wrapper.find('.inspector-dialog');
+    const logsBtn = inspector.find('.check-logs-btn');
+    expect(logsBtn.text()).toContain('Logs');
+
+    // Expanding triggers on-demand fetch -> first attempt fails and renders Retry
+    await logsBtn.trigger('click');
+    await flushPromises();
+    expect(summaryFetchCount).toBe(1);
+    expect(inspector.find('.check-summary-error').text()).toContain('Temporary GitHub 502');
+
+    // Clicking Retry loads annotations, failed step, and log excerpt
+    await inspector.find('.check-summary-retry-btn').trigger('click');
+    await flushPromises();
+    expect(summaryFetchCount).toBe(2);
+    expect(inspector.find('.check-failed-step').text()).toContain('Run npm run test');
+    expect(inspector.find('.check-annotation-path').text()).toContain('src/retry.spec.ts:18');
+    expect(inspector.find('.check-log-pre').text()).toContain('FAIL src/retry.spec.ts');
+
+    // Collapse & re-expand uses client state without re-fetching
+    await logsBtn.trigger('click');
+    expect(inspector.find('.check-summary-panel').exists()).toBe(false);
+    await logsBtn.trigger('click');
+    await flushPromises();
+    expect(summaryFetchCount).toBe(2);
+    expect(inspector.find('.check-log-pre').text()).toContain('FAIL src/retry.spec.ts');
+
+    wrapper.unmount();
+  });
 });

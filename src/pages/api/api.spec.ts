@@ -6,6 +6,7 @@ import type { APIContext } from 'astro';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getHealth } from '@/pages/api/health';
 import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
+import { GET as getCheckSummary } from '@/pages/api/pull/[owner]/[repo]/[number]/checks/[checkRunId]/summary';
 import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number]/draft';
 import { POST as postPullLabels } from '@/pages/api/pull/[owner]/[repo]/[number]/labels';
 import { POST as postMergePull } from '@/pages/api/pull/[owner]/[repo]/[number]/merge';
@@ -1722,5 +1723,156 @@ describe('API routes (mocked fetch)', () => {
       ),
     );
     expect(noneRes.status).toBe(409);
+  });
+
+  it('fetches check summary, strips Authorization on Actions log redirect, redacts token, and caches completed results', async () => {
+    const redirectUrl =
+      'https://pipelines.actions.githubusercontent.com/org/_apis/logs/55501?sig=signed';
+    let checkRunFetchCount = 0;
+    let blobAuthHeader: string | null = null;
+    let evilFetchCount = 0;
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+
+      if (url === 'https://api.github.com/repos/acme/core-api/check-runs/55501') {
+        checkRunFetchCount++;
+        return jsonResponse({
+          name: 'unit-tests',
+          status: 'completed',
+          html_url: 'https://github.com/acme/core-api/runs/55501',
+          app: { slug: 'github-actions' },
+          output: {
+            title: `Test failures (${TEST_SECRET})`,
+            summary: '1 test failed',
+            annotations_count: 1,
+          },
+        });
+      }
+
+      if (
+        url ===
+        'https://api.github.com/repos/acme/core-api/check-runs/55501/annotations?per_page=25'
+      ) {
+        return jsonResponse([
+          {
+            path: 'src/retry.ts',
+            start_line: 42,
+            end_line: 44,
+            annotation_level: 'failure',
+            title: 'Assertion failed',
+            message: `Expected retry count 3 (${TEST_SECRET})`,
+          },
+        ]);
+      }
+
+      if (url === 'https://api.github.com/repos/acme/core-api/actions/jobs/55501/logs') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: redirectUrl },
+        });
+      }
+
+      if (url === redirectUrl) {
+        const headers = new Headers(init?.headers);
+        blobAuthHeader = headers.get('authorization');
+        return new Response(
+          [
+            '2026-11-24T10:00:00.000Z ##[group]Run npm run test',
+            `2026-11-24T10:00:01.000Z \u001B[31mFAIL\u001B[0m src/retry.spec.ts (${TEST_SECRET})`,
+            '2026-11-24T10:00:02.000Z ##[error]Process completed with exit code 1.',
+          ].join('\n'),
+          { status: 200, headers: { 'content-type': 'text/plain' } },
+        );
+      }
+
+      if (url === 'https://api.github.com/repos/acme/core-api/check-runs/55502') {
+        return jsonResponse({
+          name: 'suspicious-redirect',
+          status: 'completed',
+          html_url: 'https://github.com/acme/core-api/runs/55502',
+          app: { slug: 'github-actions' },
+          output: { title: null, summary: null, annotations_count: 0 },
+        });
+      }
+
+      if (url === 'https://api.github.com/repos/acme/core-api/actions/jobs/55502/logs') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://evil.example/steal-log' },
+        });
+      }
+
+      if (url === 'https://evil.example/steal-log') {
+        evilFetchCount++;
+        return new Response('should never be fetched', { status: 200 });
+      }
+
+      return jsonResponse({ message: 'Not found' }, 404);
+    });
+
+    await setupRuntime(fetchFn);
+
+    // Invalid checkRunId returns 400
+    const badRes = await getCheckSummary(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/checks/not-a-num/summary'),
+        { owner: 'acme', repo: 'core-api', number: '42', checkRunId: 'not-a-num' },
+      ),
+    );
+    expect(badRes.status).toBe(400);
+
+    // Valid completed Actions job returns annotations + redacted log excerpt without forwarding Authorization
+    const res = await getCheckSummary(
+      makeApiContext(
+        new Request(
+          'http://127.0.0.1:4321/api/pull/acme/core-api/42/checks/55501/summary?actions=1',
+        ),
+        { owner: 'acme', repo: 'core-api', number: '42', checkRunId: '55501' },
+      ),
+    );
+    expect(res.status).toBe(200);
+    const rawText = await res.text();
+    expect(rawText).not.toContain(TEST_SECRET);
+    expect(blobAuthHeader).toBeNull();
+
+    const summary = JSON.parse(rawText) as {
+      checkRunId: number;
+      failedStep: string | null;
+      annotations: Array<{ path: string; startLine: number; endLine: number; level: string }>;
+      logExcerpt: string | null;
+      logUnavailableReason: string | null;
+    };
+    expect(summary.checkRunId).toBe(55501);
+    expect(summary.failedStep).toBe('Run npm run test');
+    expect(summary.annotations).toHaveLength(1);
+    expect(summary.annotations[0]?.path).toBe('src/retry.ts');
+    expect(summary.logExcerpt).toContain('FAIL src/retry.spec.ts');
+    expect(summary.logUnavailableReason).toBeNull();
+
+    // Second call hits in-memory cache for completed check run
+    await getCheckSummary(
+      makeApiContext(
+        new Request(
+          'http://127.0.0.1:4321/api/pull/acme/core-api/42/checks/55501/summary?actions=1',
+        ),
+        { owner: 'acme', repo: 'core-api', number: '42', checkRunId: '55501' },
+      ),
+    );
+    expect(checkRunFetchCount).toBe(1);
+
+    // Untrusted redirect target is blocked cleanly without fetching
+    const blockedRes = await getCheckSummary(
+      makeApiContext(
+        new Request(
+          'http://127.0.0.1:4321/api/pull/acme/core-api/42/checks/55502/summary?actions=1',
+        ),
+        { owner: 'acme', repo: 'core-api', number: '42', checkRunId: '55502' },
+      ),
+    );
+    expect(blockedRes.status).toBe(200);
+    const blockedBody = (await blockedRes.json()) as { logUnavailableReason: string | null };
+    expect(blockedBody.logUnavailableReason).toContain('Blocked unexpected log redirect');
+    expect(evilFetchCount).toBe(0);
   });
 });
