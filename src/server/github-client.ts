@@ -11,6 +11,7 @@ import type {
   PrReviewerDetail,
   PrTimelineItem,
   RateLimitBucket,
+  RerunFailedChecksResponse,
   SnapshotWarning,
   ToggleDraftResponse,
   UpdateBranchResponse,
@@ -241,12 +242,18 @@ query PullDetail($owner: String!, $repo: String!, $number: Int!) {
                 nodes {
                   __typename
                   ... on CheckRun {
+                    databaseId
                     name
                     status
                     conclusion
                     detailsUrl
                     startedAt
                     completedAt
+                    checkSuite {
+                      workflowRun {
+                        databaseId
+                      }
+                    }
                   }
                   ... on StatusContext {
                     context
@@ -436,6 +443,19 @@ export function validateCommitSha(value: string): string {
   return trimmed.toLowerCase();
 }
 
+export function validatePositiveIntId(value: unknown, label: string): number {
+  const num =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && SAFE_NUMBER_RE.test(value.trim())
+        ? Number(value.trim())
+        : NaN;
+  if (!Number.isSafeInteger(num) || num <= 0) {
+    throw new GitHubApiError(`Invalid ${label}`, 400);
+  }
+  return num;
+}
+
 function parseRateLimitHeaders(headers: Headers): RateLimitBucket | null {
   const remaining = headers.get('x-ratelimit-remaining');
   const limit = headers.get('x-ratelimit-limit');
@@ -584,6 +604,12 @@ export interface GitHubClient {
   ): Promise<MergePullResponse>;
   fetchRepoLabels(owner: string, repo: string): Promise<PrLabel[]>;
   setPullLabels(owner: string, repo: string, number: number, labels: string[]): Promise<PrLabel[]>;
+  rerunFailedChecks(
+    owner: string,
+    repo: string,
+    number: number,
+    options?: { expectedHeadSha?: string; jobId?: number; runId?: number },
+  ): Promise<RerunFailedChecksResponse>;
   invalidatePullDetailCache?(owner?: string, repo?: string, number?: number): void;
 }
 
@@ -641,6 +667,19 @@ function mapCheckToDetail(node: Record<string, unknown>): PrDetailCheck | null {
     ) {
       bucket = 'failing';
     }
+    const checkRunId =
+      typeof node.databaseId === 'number' && Number.isSafeInteger(node.databaseId)
+        ? node.databaseId
+        : null;
+    const checkSuite =
+      node.checkSuite && typeof node.checkSuite === 'object'
+        ? (node.checkSuite as { workflowRun?: { databaseId?: unknown } | null })
+        : null;
+    const rawWorkflowRunId = checkSuite?.workflowRun?.databaseId;
+    const workflowRunId =
+      typeof rawWorkflowRunId === 'number' && Number.isSafeInteger(rawWorkflowRunId)
+        ? rawWorkflowRunId
+        : null;
     return {
       name: String(node.name ?? 'check'),
       kind: 'CheckRun',
@@ -651,6 +690,8 @@ function mapCheckToDetail(node: Record<string, unknown>): PrDetailCheck | null {
       description: null,
       startedAt: typeof node.startedAt === 'string' ? node.startedAt : null,
       completedAt: typeof node.completedAt === 'string' ? node.completedAt : null,
+      checkRunId,
+      workflowRunId,
     };
   }
   if (typename === 'StatusContext') {
@@ -756,6 +797,124 @@ function mapGraphqlStrictError(
     return new GitHubApiError(msg, 422);
   }
   return new GitHubApiError(msg, 502);
+}
+
+const FAILED_WORKFLOW_CONCLUSIONS = new Set([
+  'failure',
+  'timed_out',
+  'startup_failure',
+  'cancelled',
+  'action_required',
+]);
+
+interface ActionsWorkflowRunItem {
+  id?: unknown;
+  workflow_id?: unknown;
+  run_number?: unknown;
+  status?: unknown;
+  conclusion?: unknown;
+  created_at?: unknown;
+}
+
+export function selectFailedLatestWorkflowRunIds(runs: ActionsWorkflowRunItem[]): number[] {
+  const latestByWorkflow = new Map<
+    string,
+    { id: number; createdMs: number; runNumber: number; status: string; conclusion: string | null }
+  >();
+
+  for (const run of runs) {
+    if (typeof run?.id !== 'number' || !Number.isSafeInteger(run.id) || run.id <= 0) {
+      continue;
+    }
+    const wfKey =
+      typeof run.workflow_id === 'number' && Number.isSafeInteger(run.workflow_id)
+        ? `wf:${run.workflow_id}`
+        : `run:${run.id}`;
+    const createdMs = typeof run.created_at === 'string' ? Date.parse(run.created_at) : NaN;
+    const normalizedCreatedMs = Number.isFinite(createdMs) ? createdMs : 0;
+    const runNumber = typeof run.run_number === 'number' ? run.run_number : 0;
+    const status = typeof run.status === 'string' ? run.status.toLowerCase() : '';
+    const conclusion = typeof run.conclusion === 'string' ? run.conclusion.toLowerCase() : null;
+
+    const existing = latestByWorkflow.get(wfKey);
+    const isNewer =
+      !existing ||
+      normalizedCreatedMs > existing.createdMs ||
+      (normalizedCreatedMs === existing.createdMs &&
+        (runNumber > existing.runNumber ||
+          (runNumber === existing.runNumber && run.id > existing.id)));
+
+    if (isNewer) {
+      latestByWorkflow.set(wfKey, {
+        id: run.id,
+        createdMs: normalizedCreatedMs,
+        runNumber,
+        status,
+        conclusion,
+      });
+    }
+  }
+
+  const failedIds: number[] = [];
+  for (const entry of latestByWorkflow.values()) {
+    if (
+      entry.status === 'completed' &&
+      entry.conclusion !== null &&
+      FAILED_WORKFLOW_CONCLUSIONS.has(entry.conclusion)
+    ) {
+      failedIds.push(entry.id);
+    }
+  }
+  return failedIds;
+}
+
+function mapActionsError(
+  response: Response,
+  rawText: string,
+  token: string,
+  nowMs: number,
+  fallbackLabel: string,
+): GitHubAuthError | GitHubNotFoundError | GitHubRateLimitError | GitHubApiError {
+  const coreRateLimit = parseRateLimitHeaders(response.headers);
+  if (response.status === 401) {
+    return new GitHubAuthError(`GitHub rejected token (${fallbackLabel}: 401 Unauthorized)`);
+  }
+  if (response.status === 404) {
+    return new GitHubNotFoundError(`${fallbackLabel}: resource not found or inaccessible`);
+  }
+  if (response.status === 403 || response.status === 429) {
+    const isRateLimit =
+      response.status === 429 ||
+      coreRateLimit?.remaining === 0 ||
+      response.headers.has('retry-after');
+    if (isRateLimit) {
+      return new GitHubRateLimitError(
+        `GitHub REST rate limit exceeded (HTTP ${response.status})`,
+        parseResetAtFromResponse(response.headers, nowMs),
+      );
+    }
+  }
+
+  let parsedMessage: string | null = null;
+  if (rawText) {
+    try {
+      const parsed = JSON.parse(rawText) as { message?: unknown };
+      if (typeof parsed?.message === 'string' && parsed.message.trim().length > 0) {
+        parsedMessage = parsed.message.trim();
+      }
+    } catch {
+      parsedMessage = null;
+    }
+  }
+
+  const baseMessage = parsedMessage ?? `${fallbackLabel} (HTTP ${response.status})`;
+  if (response.status === 403 && !/actions|permission/i.test(baseMessage)) {
+    return new GitHubApiError(
+      redactToken(`${baseMessage} (requires Actions write permission on your GitHub token)`, token),
+      403,
+    );
+  }
+  return new GitHubApiError(redactToken(baseMessage, token), response.status);
 }
 
 const PULL_DETAIL_CACHE_TTL_MS = 30_000;
@@ -1929,6 +2088,207 @@ export function createGitHubClient(deps: GitHubClientDeps): GitHubClient {
                 : null,
           };
         });
+    },
+
+    async rerunFailedChecks(
+      owner: string,
+      repo: string,
+      number: number,
+      options: { expectedHeadSha?: string; jobId?: number; runId?: number } = {},
+    ): Promise<RerunFailedChecksResponse> {
+      const safeOwner = validateRepoSegment(owner, 'owner');
+      const safeRepo = validateRepoSegment(repo, 'repo');
+      const safeNum = validatePullNumber(number);
+
+      if (options.jobId !== undefined && options.runId !== undefined) {
+        throw new GitHubApiError('Provide either jobId or runId, not both', 400);
+      }
+
+      const safeJobId =
+        options.jobId !== undefined ? validatePositiveIntId(options.jobId, 'jobId') : undefined;
+      const safeRunId =
+        options.runId !== undefined ? validatePositiveIntId(options.runId, 'runId') : undefined;
+      const safeSha =
+        options.expectedHeadSha !== undefined
+          ? validateCommitSha(options.expectedHeadSha)
+          : undefined;
+      const token = await deps.tokenStore.getToken();
+
+      const restHeaders = {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'ghcc/0.1',
+      };
+
+      async function postActionsRerun(url: string, fallbackLabel: string): Promise<void> {
+        let response: Response;
+        try {
+          response = await fetchFn(url, {
+            method: 'POST',
+            headers: restHeaders,
+          });
+        } catch (error) {
+          throw new GitHubApiError(
+            `Network error (${fallbackLabel}): ${sanitizeErrorMessage(error, token)}`,
+            502,
+          );
+        }
+
+        if (!response.ok) {
+          const rawText = await response.text().catch(() => '');
+          throw mapActionsError(response, rawText, token, now(), fallbackLabel);
+        }
+      }
+
+      const repoBase = `${GITHUB_REST_BASE}/repos/${encodeURIComponent(safeOwner)}/${encodeURIComponent(safeRepo)}`;
+
+      if (safeJobId !== undefined) {
+        await postActionsRerun(
+          `${repoBase}/actions/jobs/${safeJobId}/rerun`,
+          `Re-running job ${safeJobId}`,
+        );
+        return {
+          ok: true,
+          scope: 'job',
+          rerunCount: 1,
+          runIds: [],
+          jobId: safeJobId,
+          message: 'Re-run requested for failed job.',
+        };
+      }
+
+      if (safeRunId !== undefined) {
+        await postActionsRerun(
+          `${repoBase}/actions/runs/${safeRunId}/rerun-failed-jobs`,
+          `Re-running workflow run ${safeRunId}`,
+        );
+        return {
+          ok: true,
+          scope: 'run',
+          rerunCount: 1,
+          runIds: [safeRunId],
+          message: 'Re-run requested for failed jobs in workflow run.',
+        };
+      }
+
+      let headSha = safeSha;
+      if (!headSha) {
+        let prResponse: Response;
+        try {
+          prResponse = await fetchFn(`${repoBase}/pulls/${safeNum}`, {
+            method: 'GET',
+            headers: restHeaders,
+          });
+        } catch (error) {
+          throw new GitHubApiError(
+            `Network error loading pull request head commit: ${sanitizeErrorMessage(error, token)}`,
+            502,
+          );
+        }
+        if (!prResponse.ok) {
+          const rawText = await prResponse.text().catch(() => '');
+          throw mapActionsError(
+            prResponse,
+            rawText,
+            token,
+            now(),
+            `Pull request ${safeOwner}/${safeRepo}#${safeNum}`,
+          );
+        }
+        const prBody = (await prResponse.json()) as { head?: { sha?: unknown } };
+        if (typeof prBody?.head?.sha !== 'string') {
+          throw new GitHubApiError('Could not determine pull request head commit SHA', 502);
+        }
+        headSha = validateCommitSha(prBody.head.sha);
+      }
+
+      let runsResponse: Response;
+      try {
+        runsResponse = await fetchFn(
+          `${repoBase}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100`,
+          {
+            method: 'GET',
+            headers: restHeaders,
+          },
+        );
+      } catch (error) {
+        throw new GitHubApiError(
+          `Network error listing workflow runs: ${sanitizeErrorMessage(error, token)}`,
+          502,
+        );
+      }
+
+      if (!runsResponse.ok) {
+        const rawText = await runsResponse.text().catch(() => '');
+        throw mapActionsError(runsResponse, rawText, token, now(), 'Listing GitHub Actions runs');
+      }
+
+      const runsPayload = (await runsResponse.json()) as {
+        workflow_runs?: ActionsWorkflowRunItem[];
+      };
+      const eligibleRunIds = selectFailedLatestWorkflowRunIds(
+        Array.isArray(runsPayload?.workflow_runs) ? runsPayload.workflow_runs : [],
+      );
+
+      if (eligibleRunIds.length === 0) {
+        throw new GitHubApiError(
+          'No re-runnable failed GitHub Actions runs found for this commit.',
+          409,
+        );
+      }
+
+      const queue = [...eligibleRunIds];
+      const succeededRunIds: number[] = [];
+      const errors: unknown[] = [];
+      let fatalError: unknown = null;
+
+      async function worker(): Promise<void> {
+        while (queue.length > 0 && !fatalError) {
+          const runId = queue.shift();
+          if (runId === undefined) {
+            continue;
+          }
+          try {
+            await postActionsRerun(
+              `${repoBase}/actions/runs/${runId}/rerun-failed-jobs`,
+              `Re-running workflow run ${runId}`,
+            );
+            succeededRunIds.push(runId);
+          } catch (error) {
+            if (error instanceof GitHubAuthError || error instanceof GitHubRateLimitError) {
+              fatalError = error;
+              return;
+            }
+            errors.push(error);
+          }
+        }
+      }
+
+      const concurrency = Math.min(3, queue.length);
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+      if (fatalError) {
+        throw fatalError;
+      }
+
+      if (succeededRunIds.length === 0) {
+        throw errors[0] ?? new GitHubApiError('Failed to re-run failed GitHub Actions runs.', 502);
+      }
+
+      const runWord = succeededRunIds.length === 1 ? 'workflow run' : 'workflow runs';
+      const partialNote =
+        errors.length > 0
+          ? ` (${errors.length} ${errors.length === 1 ? 'run' : 'runs'} could not be re-run)`
+          : '';
+
+      return {
+        ok: true,
+        scope: 'all',
+        rerunCount: succeededRunIds.length,
+        runIds: succeededRunIds,
+        message: `Re-run requested for ${succeededRunIds.length} failed ${runWord}${partialNote}.`,
+      };
     },
   };
 }

@@ -43,8 +43,10 @@
         :merge-state="mergeState"
         :repo-labels-state="repoLabelsState"
         :label-state="labelState"
+        :rerun-state="rerunState"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
+        @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
         @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
         @request-merge="(target, method) => $emit('request-merge', target, method)"
         @load-labels="$emit('load-labels', $event)"
@@ -80,8 +82,10 @@
       :merge-state="mergeState"
       :repo-labels-state="repoLabelsState"
       :label-state="labelState"
+      :rerun-state="rerunState"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
+      @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
       @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
       @request-merge="(target, method) => $emit('request-merge', target, method)"
       @load-labels="$emit('load-labels', $event)"
@@ -100,12 +104,14 @@ import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
+  IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_REPO_LABELS_STATE,
   type InspectorState,
   type PrDraftState,
   type PrLabelsState,
   type PrMergeState,
+  type PrRerunState,
   type PrSyncState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
@@ -123,6 +129,7 @@ interface Props {
   mergeState?: PrMergeState;
   repoLabelsState?: RepoLabelsState;
   labelState?: PrLabelsState;
+  rerunState?: PrRerunState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -132,12 +139,14 @@ const props = withDefaults(defineProps<Props>(), {
   mergeState: () => IDLE_PR_MERGE_STATE,
   repoLabelsState: () => IDLE_REPO_LABELS_STATE,
   labelState: () => IDLE_PR_LABELS_STATE,
+  rerunState: () => IDLE_PR_RERUN_STATE,
 });
 
 defineEmits<{
   close: [];
   retry: [pr: PrView];
   sync: [pr: PrView];
+  'rerun-checks': [pr: PrView, options?: { jobId?: number; runId?: number }];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
   'load-labels': [pr: PrView];

@@ -71,8 +71,10 @@
           :merge-states="mergeStates"
           :repo-labels-states="repoLabelsStates"
           :label-states="labelStates"
+          :rerun-states="rerunStates"
           @select="onSelectPr"
           @sync="syncPullRequest"
+          @rerun-checks="rerunPullChecks"
           @toggle-draft="togglePullDraft"
           @request-merge="openMergeConfirm"
           @load-labels="onLoadLabels"
@@ -92,9 +94,11 @@
               :merge-state="mergeStates[pr.key]"
               :repo-labels-state="repoLabelsStates[pr.repository]"
               :label-state="labelStates[pr.key]"
+              :rerun-state="rerunStates[pr.key]"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
+              @rerun-checks="rerunPullChecks"
               @toggle-draft="togglePullDraft"
               @request-merge="openMergeConfirm"
               @load-labels="onLoadLabels"
@@ -131,9 +135,11 @@
                 :merge-state="mergeStates[pr.key]"
                 :repo-labels-state="repoLabelsStates[pr.repository]"
                 :label-state="labelStates[pr.key]"
+                :rerun-state="rerunStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
+                @rerun-checks="rerunPullChecks"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -167,9 +173,11 @@
                 :merge-state="mergeStates[pr.key]"
                 :repo-labels-state="repoLabelsStates[pr.repository]"
                 :label-state="labelStates[pr.key]"
+                :rerun-state="rerunStates[pr.key]"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
+                @rerun-checks="rerunPullChecks"
                 @toggle-draft="togglePullDraft"
                 @request-merge="openMergeConfirm"
                 @load-labels="onLoadLabels"
@@ -211,9 +219,11 @@
       :merge-state="selectedPr ? mergeStates[selectedPr.key] : undefined"
       :repo-labels-state="selectedPr ? repoLabelsStates[selectedPr.repository] : undefined"
       :label-state="selectedPr ? labelStates[selectedPr.key] : undefined"
+      :rerun-state="selectedPr ? rerunStates[selectedPr.key] : undefined"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
+      @rerun-checks="rerunPullChecks"
       @toggle-draft="togglePullDraft"
       @request-merge="openMergeConfirm"
       @load-labels="onLoadLabels"
@@ -293,8 +303,10 @@ const {
   mergeStates,
   repoLabelsStates,
   labelStates,
+  rerunStates,
   fetchSnapshot,
   syncPullRequest,
+  rerunPullChecks,
   togglePullDraft,
   mergePullRequest,
   loadRepoLabels,

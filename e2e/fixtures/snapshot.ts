@@ -135,7 +135,7 @@ export function makeSnapshot(overrides: Partial<SnapshotResponse> = {}): Snapsho
 
 export function makePrDetail(pr: PrView = makePrView()): PrDetailResponse {
   const checks: PrDetailCheck[] = [
-    ...pr.ci.failing.map((check) => ({
+    ...pr.ci.failing.map((check, index) => ({
       name: check.name,
       kind: 'CheckRun' as const,
       status: 'COMPLETED',
@@ -145,6 +145,8 @@ export function makePrDetail(pr: PrView = makePrView()): PrDetailResponse {
       description: null,
       startedAt: pr.updatedAt,
       completedAt: pr.updatedAt,
+      checkRunId: 50000 + index + 1,
+      workflowRunId: 9000 + index + 1,
     })),
     ...Array.from({ length: pr.ci.passing }, (_, index) => ({
       name: `check-${index + 1}`,

@@ -120,6 +120,28 @@
         />
 
         <button
+          v-if="showRerunButton"
+          type="button"
+          class="rerun-btn"
+          :class="{
+            queued: isRerunQueued,
+            rerunning: rerunState.status === 'rerunning',
+          }"
+          :aria-disabled="isRerunBusy ? 'true' : undefined"
+          :aria-label="rerunAriaLabel"
+          title="Re-run failed GitHub Actions workflow runs"
+          @click="onRerunClick"
+        >
+          <progress
+            v-if="rerunState.status === 'rerunning'"
+            class="loading-spinner"
+            aria-label="Re-running failed checks"
+          ></progress>
+          <CarbonIcon v-else :name="isRerunQueued ? 'checkmark' : 'renew'" :size="13" />
+          <span>{{ rerunButtonText }}</span>
+        </button>
+
+        <button
           v-if="showSyncButton"
           type="button"
           class="sync-btn"
@@ -174,6 +196,10 @@
       {{ syncState.error }}
     </p>
 
+    <p v-if="rerunState.status === 'error'" class="sync-error" role="alert">
+      {{ rerunState.error }}
+    </p>
+
     <slot name="inline-inspector" />
   </li>
 </template>
@@ -188,11 +214,13 @@ import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
+  IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_REPO_LABELS_STATE,
   type PrDraftState,
   type PrLabelsState,
   type PrMergeState,
+  type PrRerunState,
   type PrSyncState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
@@ -208,6 +236,7 @@ interface Props {
   mergeState?: PrMergeState;
   repoLabelsState?: RepoLabelsState;
   labelState?: PrLabelsState;
+  rerunState?: PrRerunState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -216,17 +245,52 @@ const props = withDefaults(defineProps<Props>(), {
   mergeState: () => IDLE_PR_MERGE_STATE,
   repoLabelsState: () => IDLE_REPO_LABELS_STATE,
   labelState: () => IDLE_PR_LABELS_STATE,
+  rerunState: () => IDLE_PR_RERUN_STATE,
 });
 
 const emit = defineEmits<{
   select: [pr: PrView];
   sync: [pr: PrView];
+  'rerun-checks': [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
   'load-labels': [pr: PrView];
   'retry-load-labels': [pr: PrView];
   'update-labels': [pr: PrView, labels: string[]];
 }>();
+
+const showRerunButton = computed<boolean>(
+  () => props.pr.ci.state === 'failing' || props.rerunState.status !== 'idle',
+);
+
+const isRerunQueued = computed<boolean>(
+  () => props.rerunState.status === 'queued' && props.rerunState.jobId === null,
+);
+
+const isRerunBusy = computed<boolean>(
+  () => props.rerunState.status === 'rerunning' || isRerunQueued.value,
+);
+
+const rerunButtonText = computed<string>(() => {
+  if (props.rerunState.status === 'rerunning') {
+    return 'Re-running';
+  }
+  if (isRerunQueued.value) {
+    return 'Queued';
+  }
+  return 'Re-run CI';
+});
+
+const rerunAriaLabel = computed<string>(() => {
+  return `${rerunButtonText.value} failed checks for ${props.pr.key}`;
+});
+
+function onRerunClick(): void {
+  if (isRerunBusy.value) {
+    return;
+  }
+  emit('rerun-checks', props.pr);
+}
 
 const showSyncButton = computed<boolean>(
   () => props.pr.merge.state === 'behind' || props.syncState.status !== 'idle',
@@ -575,6 +639,40 @@ const diffWidths = computed(() => {
     padding: 0;
     margin: 0.625rem 0.625rem 0 0;
   }
+}
+
+.rerun-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--accent-amber);
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rerun-btn:hover:not([aria-disabled='true']) {
+  background-color: var(--accent-amber);
+  color: light-dark(#ffffff, #0b1017);
+}
+
+.rerun-btn.queued {
+  border-color: var(--accent-emerald);
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+}
+
+.rerun-btn[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.85;
 }
 
 .sync-btn {

@@ -7,7 +7,7 @@ A local and self-hosted web dashboard for pull requests you authored, pull reque
 - **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); prioritized **Action Queue** (including your authored waiting PRs) alongside a side rail with **Ready to Merge** and **Waiting on Others** quick-jump panels, plus a `stale` badge after more than 3 idle days.
 - **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, labels, and blocker summary; multi-repository checkboxes with a tri-state **Select all** toggle in the filter bar's **All repos** dropdown; URL-synced filter state.
 - **Non-modal PR inspector**: Slide-over right sidebar on desktop (inline expansion on narrow screens) showing sanitized GitHub Markdown PR descriptions, inline and fullscreen interactive Mermaid diagrams, grouped collapsible CI checks (up to 100), reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
-- **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), and `Sync` button to merge the base branch into behind-base PRs (including drafts, via GitHub's `update-branch` REST API), all same-origin protected.
+- **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), `Re-run CI` / per-job `Re-run` buttons for failed GitHub Actions checks, and `Sync` button to merge the base branch into behind-base PRs (including drafts, via GitHub's `update-branch` REST API), all same-origin protected.
 - **Live polling & theme**: Configurable auto-refresh (`60s` default; `60s`, `120s`, or `5m`) with tab-focus catch-up plus manual refresh (`r`), GraphQL (`GQL`) and REST (`REST`) rate-limit indicators, live refresh status, and light/dark mode toggle.
 
 ## Choose Your Setup
@@ -37,7 +37,7 @@ If you use a Personal Access Token (required for persistent Docker setups and op
 - **Fine-grained PAT**:
   - Scoped to a **single resource owner** (either your personal account or one organization). If your PRs span multiple organizations or personal + org repositories, use a Classic PAT or `gh auth login` instead.
   - **Viewing only**: **Metadata** (Read-only, granted automatically), **Pull requests** (Read-only), **Contents** (Read-only, used for behind-base draft detection), **Checks** (Read-only), and **Commit statuses** (Read-only).
-  - **Full PR actions** (`Sync`, `Ready | Draft`, `Labels`, `Squash / Merge`): upgrade **Pull requests** and **Contents** to **Read and write** (and **Issues** to **Read and write** if your repository enforces it for PR labels).
+  - **Full PR actions** (`Sync`, `Ready | Draft`, `Labels`, `Squash / Merge`, `Re-run CI`): upgrade **Pull requests**, **Contents**, and **Actions** to **Read and write** (and **Issues** to **Read and write** if your repository enforces it for PR labels).
 - **Organizations with SAML SSO**:
   - Classic PATs must be authorized for the organization (**Configure SSO** in GitHub token settings).
   - Fine-grained PATs must be scoped to (and, if required, approved by) the organization.
@@ -272,6 +272,7 @@ Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0
 - `GET /api/repo/{owner}/{repo}/labels` — lists repository labels (name, hex color, description) for the label picker
 - `POST /api/pull/{owner}/{repo}/{number}/labels` — sets pull request labels via GitHub's issues labels API (same-origin protected)
 - `POST /api/pull/{owner}/{repo}/{number}/merge` — merges a pull request via GitHub's merge API (`squash` by default or `merge` commit, same-origin protected)
+- `POST /api/pull/{owner}/{repo}/{number}/rerun-failed` — re-runs failed GitHub Actions workflow runs for the pull request head commit or a specific failed Actions job/run (same-origin protected)
 
 ## Troubleshooting
 

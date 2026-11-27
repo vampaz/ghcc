@@ -6,6 +6,7 @@ import type {
   PrLabel,
   PrView,
   RepoLabelsResponse,
+  RerunFailedChecksResponse,
   SnapshotResponse,
   ToggleDraftResponse,
   UpdateBranchResponse,
@@ -81,6 +82,53 @@ export type PrLabelsEvent =
   | { type: 'RESET' };
 
 export const IDLE_PR_LABELS_STATE: PrLabelsState = { status: 'idle' };
+
+export type PrRerunState =
+  | { status: 'idle' }
+  | { status: 'rerunning'; headRefOid: string; jobId: number | null }
+  | { status: 'queued'; headRefOid: string; jobId: number | null; message: string }
+  | { status: 'error'; headRefOid: string; jobId: number | null; error: string };
+
+export type PrRerunEvent =
+  | { type: 'RERUN_REQUEST'; headRefOid: string; jobId: number | null }
+  | { type: 'RERUN_ACCEPTED'; headRefOid: string; jobId: number | null; message: string }
+  | { type: 'RERUN_FAILED'; headRefOid: string; jobId: number | null; error: string }
+  | { type: 'RESET' };
+
+export const IDLE_PR_RERUN_STATE: PrRerunState = { status: 'idle' };
+
+export function transitionPrRerunState(current: PrRerunState, event: PrRerunEvent): PrRerunState {
+  if (event.type === 'RESET') {
+    return IDLE_PR_RERUN_STATE;
+  }
+  switch (current.status) {
+    case 'idle':
+    case 'error':
+    case 'queued':
+      if (event.type === 'RERUN_REQUEST') {
+        return { status: 'rerunning', headRefOid: event.headRefOid, jobId: event.jobId };
+      }
+      return current;
+    case 'rerunning':
+      if (event.type === 'RERUN_ACCEPTED') {
+        return {
+          status: 'queued',
+          headRefOid: event.headRefOid,
+          jobId: event.jobId,
+          message: event.message,
+        };
+      }
+      if (event.type === 'RERUN_FAILED') {
+        return {
+          status: 'error',
+          headRefOid: event.headRefOid,
+          jobId: event.jobId,
+          error: event.error,
+        };
+      }
+      return current;
+  }
+}
 
 export function transitionPrLabelsState(
   current: PrLabelsState,
@@ -240,6 +288,7 @@ export function useDashboardState(
   const mergeStates = ref<Record<string, PrMergeState>>({});
   const repoLabelsStates = ref<Record<string, RepoLabelsState>>({});
   const labelStates = ref<Record<string, PrLabelsState>>({});
+  const rerunStates = ref<Record<string, PrRerunState>>({});
 
   const inspector = ref<InspectorState>({
     status: 'closed',
@@ -371,6 +420,58 @@ export function useDashboardState(
 
   function getLabelState(prKey: string): PrLabelsState {
     return labelStates.value[prKey] ?? IDLE_PR_LABELS_STATE;
+  }
+
+  function getRerunState(prKey: string): PrRerunState {
+    return rerunStates.value[prKey] ?? IDLE_PR_RERUN_STATE;
+  }
+
+  function setRerunState(prKey: string, next: PrRerunState): void {
+    if (next.status === 'idle') {
+      if (!(prKey in rerunStates.value)) {
+        return;
+      }
+      const copy = { ...rerunStates.value };
+      delete copy[prKey];
+      rerunStates.value = copy;
+      return;
+    }
+    rerunStates.value = {
+      ...rerunStates.value,
+      [prKey]: next,
+    };
+  }
+
+  function reconcileRerunStates(data: SnapshotResponse): void {
+    const entries = Object.entries(rerunStates.value);
+    if (entries.length === 0) {
+      return;
+    }
+    const prByKey = new Map(data.pullRequests.map((pr) => [pr.key, pr]));
+    let changed = false;
+    const nextMap: Record<string, PrRerunState> = { ...rerunStates.value };
+
+    for (const [key, state] of entries) {
+      if (state.status === 'idle') {
+        delete nextMap[key];
+        changed = true;
+        continue;
+      }
+      const updated = prByKey.get(key);
+      const shouldReset =
+        !updated ||
+        (state.status !== 'rerunning' &&
+          (updated.ci.state !== 'failing' || updated.headRefOid !== state.headRefOid));
+
+      if (shouldReset) {
+        delete nextMap[key];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      rerunStates.value = nextMap;
+    }
   }
 
   function setLabelState(prKey: string, next: PrLabelsState): void {
@@ -656,6 +757,7 @@ export function useDashboardState(
       reconcileSyncStates(data);
       reconcileDraftStates(data);
       reconcileMergeStates(data);
+      reconcileRerunStates(data);
       reconcileOpenInspector(data, force);
       announceSnapshot(data);
 
@@ -752,6 +854,89 @@ export function useDashboardState(
         }),
       );
       announcement.value = `Failed to synchronize ${pr.key}: ${message}`;
+    }
+  }
+
+  async function rerunPullChecks(
+    pr: PrView,
+    options: { jobId?: number; runId?: number } = {},
+  ): Promise<boolean> {
+    const current = getRerunState(pr.key);
+    const jobId = options.jobId ?? null;
+    if (current.status === 'rerunning') {
+      return false;
+    }
+    if (
+      current.status === 'queued' &&
+      current.headRefOid === pr.headRefOid &&
+      current.jobId === jobId
+    ) {
+      return false;
+    }
+
+    setRerunState(
+      pr.key,
+      transitionPrRerunState(current, {
+        type: 'RERUN_REQUEST',
+        headRefOid: pr.headRefOid,
+        jobId,
+      }),
+    );
+
+    try {
+      const payload: { expectedHeadSha?: string; jobId?: number; runId?: number } = {};
+      if (options.jobId !== undefined) {
+        payload.jobId = options.jobId;
+      } else if (options.runId !== undefined) {
+        payload.runId = options.runId;
+      } else if (pr.headRefOid) {
+        payload.expectedHeadSha = pr.headRefOid;
+      }
+
+      const response = await fetchFn(
+        `/api/pull/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/rerun-failed`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        },
+      );
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `Failed to re-run checks (HTTP ${response.status})`);
+      }
+
+      const data = (await response.json()) as RerunFailedChecksResponse;
+      detailCache.delete(pr.key);
+      setRerunState(
+        pr.key,
+        transitionPrRerunState(getRerunState(pr.key), {
+          type: 'RERUN_ACCEPTED',
+          headRefOid: pr.headRefOid,
+          jobId,
+          message: data.message,
+        }),
+      );
+      announcement.value = `${data.message} (${pr.key})`;
+      schedulePostSyncRefresh();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to re-run failed checks';
+      setRerunState(
+        pr.key,
+        transitionPrRerunState(getRerunState(pr.key), {
+          type: 'RERUN_FAILED',
+          headRefOid: pr.headRefOid,
+          jobId,
+          error: message,
+        }),
+      );
+      announcement.value = `Failed to re-run checks on ${pr.key}: ${message}`;
+      return false;
     }
   }
 
@@ -1107,8 +1292,10 @@ export function useDashboardState(
     mergeStates,
     repoLabelsStates,
     labelStates,
+    rerunStates,
     fetchSnapshot,
     syncPullRequest,
+    rerunPullChecks,
     togglePullDraft,
     mergePullRequest,
     loadRepoLabels,

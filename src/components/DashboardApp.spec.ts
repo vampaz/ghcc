@@ -6,10 +6,12 @@ import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
+  IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
   transitionPrDraftState,
   transitionPrLabelsState,
   transitionPrMergeState,
+  transitionPrRerunState,
   transitionPrSyncState,
 } from '@/composables/use-dashboard-state';
 import {
@@ -1813,6 +1815,186 @@ describe('DashboardApp', () => {
     await mineBtn!.trigger('click');
     expect(wrapper.findAll('.ready-item')).toHaveLength(1);
     expect(wrapper.find('.ready-item').text()).toContain('#202');
+
+    wrapper.unmount();
+  });
+
+  it('supports Re-run CI on failing PR cards and per-job Re-run in the inspector with explicit FSM', async () => {
+    const headSha = 'a'.repeat(40);
+    const rerunning = transitionPrRerunState(IDLE_PR_RERUN_STATE, {
+      type: 'RERUN_REQUEST',
+      headRefOid: headSha,
+      jobId: null,
+    });
+    expect(rerunning).toEqual({ status: 'rerunning', headRefOid: headSha, jobId: null });
+
+    const failed = transitionPrRerunState(rerunning, {
+      type: 'RERUN_FAILED',
+      headRefOid: headSha,
+      jobId: null,
+      error: 'Missing Actions permission',
+    });
+    expect(failed).toEqual({
+      status: 'error',
+      headRefOid: headSha,
+      jobId: null,
+      error: 'Missing Actions permission',
+    });
+
+    const retryingJob = transitionPrRerunState(failed, {
+      type: 'RERUN_REQUEST',
+      headRefOid: headSha,
+      jobId: 55501,
+    });
+    const queuedJob = transitionPrRerunState(retryingJob, {
+      type: 'RERUN_ACCEPTED',
+      headRefOid: headSha,
+      jobId: 55501,
+      message: 'Re-run requested for failed job.',
+    });
+    expect(queuedJob).toEqual({
+      status: 'queued',
+      headRefOid: headSha,
+      jobId: 55501,
+      message: 'Re-run requested for failed job.',
+    });
+    expect(transitionPrRerunState(queuedJob, { type: 'RESET' })).toEqual(IDLE_PR_RERUN_STATE);
+
+    const rerunCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let failNextRerun = false;
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/pull/acme/core-api/101/rerun-failed') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        rerunCalls.push({ url, body });
+        if (failNextRerun) {
+          return new Response(
+            JSON.stringify({ error: 'Requires Actions write permission on your GitHub token' }),
+            { status: 403, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            scope: body.jobId ? 'job' : 'all',
+            rerunCount: 1,
+            runIds: body.jobId ? [] : [9001],
+            ...(body.jobId ? { jobId: body.jobId } : {}),
+            message: body.jobId
+              ? 'Re-run requested for failed job.'
+              : 'Re-run requested for 1 failed workflow run.',
+          }),
+          { status: 202, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      if (url === '/api/pull/acme/core-api/101') {
+        const detail: PrDetailResponse = {
+          ...makeDetail(),
+          checksTotalCount: 3,
+          checks: [
+            {
+              name: 'unit-tests',
+              kind: 'CheckRun',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              bucket: 'failing',
+              url: 'https://github.com/acme/core-api/actions/runs/9001',
+              description: null,
+              startedAt: '2026-11-24T10:00:00.000Z',
+              completedAt: '2026-11-24T10:05:00.000Z',
+              checkRunId: 55501,
+              workflowRunId: 9001,
+            },
+            {
+              name: 'external-ci',
+              kind: 'CheckRun',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              bucket: 'failing',
+              url: 'https://ci.example.com/1',
+              description: null,
+              startedAt: '2026-11-24T10:00:00.000Z',
+              completedAt: '2026-11-24T10:05:00.000Z',
+              checkRunId: 55502,
+              workflowRunId: null,
+            },
+            {
+              name: 'lint',
+              kind: 'CheckRun',
+              status: 'COMPLETED',
+              conclusion: 'SUCCESS',
+              bucket: 'passing',
+              url: 'https://github.com/acme/core-api/actions/runs/9001',
+              description: null,
+              startedAt: '2026-11-24T10:00:00.000Z',
+              completedAt: '2026-11-24T10:02:00.000Z',
+              checkRunId: 55503,
+              workflowRunId: 9001,
+            },
+          ],
+        };
+        return new Response(JSON.stringify(detail), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      const base = makeSnapshot();
+      const prs = base.pullRequests.map((p) =>
+        p.key === 'acme/core-api#101' ? { ...p, headRefOid: headSha } : p,
+      );
+      return new Response(JSON.stringify({ ...base, pullRequests: prs }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"rerun-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Only failing-CI PR #101 shows Re-run CI button on card
+    expect(wrapper.findAll('.action-queue .rerun-btn')).toHaveLength(1);
+    const cardRerunBtn = wrapper.find('.action-queue .rerun-btn');
+    expect(cardRerunBtn.text()).toContain('Re-run CI');
+
+    // Open inspector for #101 -> shows Checks header Re-run failed + per-job Re-run ONLY on Actions check (55501)
+    await wrapper.find('[data-pr-key="acme/core-api#101"]').trigger('click');
+    await flushPromises();
+    const inspector = wrapper.find('.inspector-dialog');
+    expect(inspector.find('.checks-rerun-btn').text()).toContain('Re-run failed');
+    const perJobButtons = inspector.findAll('.check-rerun-btn');
+    expect(perJobButtons).toHaveLength(1);
+    expect(perJobButtons[0]!.attributes('aria-label')).toBe('Re-run unit-tests');
+
+    // Trigger per-job rerun -> sends { jobId: 55501 } and shows status note
+    await perJobButtons[0]!.trigger('click');
+    await flushPromises();
+    expect(rerunCalls[0]).toEqual({
+      url: '/api/pull/acme/core-api/101/rerun-failed',
+      body: { jobId: 55501 },
+    });
+    expect(inspector.find('.rerun-status-note').text()).toContain(
+      'Re-run requested for failed job.',
+    );
+
+    // Trigger card PR-wide Re-run CI -> sends { expectedHeadSha } and transitions card button to Queued
+    await cardRerunBtn.trigger('click');
+    await flushPromises();
+    expect(rerunCalls[1]).toEqual({
+      url: '/api/pull/acme/core-api/101/rerun-failed',
+      body: { expectedHeadSha: headSha },
+    });
+    expect(cardRerunBtn.text()).toContain('Queued');
+    expect(cardRerunBtn.attributes('aria-disabled')).toBe('true');
+
+    // Error state on per-job rerun surfaces inline alert
+    failNextRerun = true;
+    await perJobButtons[0]!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.pr-card .sync-error').text()).toContain('Actions write permission');
 
     wrapper.unmount();
   });

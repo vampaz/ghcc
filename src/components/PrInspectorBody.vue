@@ -139,16 +139,46 @@
               </template>
             </span>
           </h2>
-          <button
-            v-if="checkGroups.length > 1"
-            type="button"
-            class="checks-toggle-all-btn"
-            :aria-expanded="allGroupsExpanded ? 'true' : 'false'"
-            @click="toggleAllCheckGroups"
-          >
-            {{ allGroupsExpanded ? 'Collapse all' : 'Expand all' }}
-          </button>
+          <div class="detail-heading-actions">
+            <button
+              v-if="showRerunAllAction"
+              type="button"
+              class="checks-rerun-btn"
+              :class="{
+                queued: isRerunAllQueued,
+                rerunning: isRerunAllPending,
+              }"
+              :aria-disabled="isRerunAllBusy ? 'true' : undefined"
+              :aria-label="rerunAllAriaLabel"
+              @click="onRerunAllClick"
+            >
+              <progress
+                v-if="isRerunAllPending"
+                class="loading-spinner"
+                aria-label="Re-running failed checks"
+              ></progress>
+              <CarbonIcon v-else :name="isRerunAllQueued ? 'checkmark' : 'renew'" :size="12" />
+              <span>{{ rerunAllButtonText }}</span>
+            </button>
+            <button
+              v-if="checkGroups.length > 1"
+              type="button"
+              class="checks-toggle-all-btn"
+              :aria-expanded="allGroupsExpanded ? 'true' : 'false'"
+              @click="toggleAllCheckGroups"
+            >
+              {{ allGroupsExpanded ? 'Collapse all' : 'Expand all' }}
+            </button>
+          </div>
         </div>
+
+        <p v-if="rerunState.status === 'queued'" class="rerun-status-note" role="status">
+          {{ rerunState.message }}
+        </p>
+
+        <p v-if="rerunState.status === 'error'" class="sync-error-note" role="alert">
+          {{ rerunState.error }}
+        </p>
 
         <p v-if="inspector.detail.checks.length === 0" class="empty-note">No checks reported.</p>
 
@@ -195,6 +225,31 @@
                 >
                   {{ item.displayName }}
                 </span>
+                <button
+                  v-if="isRerunnableJob(item.check)"
+                  type="button"
+                  class="check-rerun-btn"
+                  :class="{
+                    queued: isJobQueued(item.check.checkRunId!),
+                    rerunning: isJobRerunning(item.check.checkRunId!),
+                  }"
+                  :aria-disabled="isJobButtonDisabled(item.check.checkRunId!) ? 'true' : undefined"
+                  :aria-label="`Re-run ${item.check.name}`"
+                  :title="`Re-run job ${item.check.name}`"
+                  @click="onRerunJobClick(item.check.checkRunId!)"
+                >
+                  <progress
+                    v-if="isJobRerunning(item.check.checkRunId!)"
+                    class="loading-spinner"
+                    aria-label="Re-running job"
+                  ></progress>
+                  <CarbonIcon
+                    v-else
+                    :name="isJobQueued(item.check.checkRunId!) ? 'checkmark' : 'renew'"
+                    :size="12"
+                  />
+                  <span>{{ jobRerunLabel(item.check.checkRunId!) }}</span>
+                </button>
                 <a
                   v-if="item.check.url"
                   :href="item.check.url"
@@ -262,17 +317,19 @@ import {
   IDLE_PR_DRAFT_STATE,
   IDLE_PR_LABELS_STATE,
   IDLE_PR_MERGE_STATE,
+  IDLE_PR_RERUN_STATE,
   IDLE_PR_SYNC_STATE,
   IDLE_REPO_LABELS_STATE,
   type InspectorState,
   type PrDraftState,
   type PrLabelsState,
   type PrMergeState,
+  type PrRerunState,
   type PrSyncState,
   type RepoLabelsState,
 } from '@/composables/use-dashboard-state';
 import type { ResolvedTheme } from '@/composables/use-theme';
-import type { MergeMethod, PrView } from '@/types/pr';
+import type { MergeMethod, PrDetailCheck, PrView } from '@/types/pr';
 import { type CheckGroup, groupDetailChecks } from '@/utils/check-groups';
 import { formatRelativeAge } from '@/utils/format';
 
@@ -286,6 +343,7 @@ interface Props {
   mergeState?: PrMergeState;
   repoLabelsState?: RepoLabelsState;
   labelState?: PrLabelsState;
+  rerunState?: PrRerunState;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -295,11 +353,13 @@ const props = withDefaults(defineProps<Props>(), {
   mergeState: () => IDLE_PR_MERGE_STATE,
   repoLabelsState: () => IDLE_REPO_LABELS_STATE,
   labelState: () => IDLE_PR_LABELS_STATE,
+  rerunState: () => IDLE_PR_RERUN_STATE,
 });
 
 const emit = defineEmits<{
   retry: [pr: PrView];
   sync: [pr: PrView];
+  'rerun-checks': [pr: PrView, options?: { jobId?: number; runId?: number }];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
   'load-labels': [pr: PrView];
@@ -387,6 +447,92 @@ function onSyncClick(): void {
     return;
   }
   emit('sync', props.pr);
+}
+
+const hasFailingChecks = computed<boolean>(() => {
+  if (props.inspector.status === 'open') {
+    return props.inspector.detail.checks.some((check) => check.bucket === 'failing');
+  }
+  return props.pr?.ci.state === 'failing';
+});
+
+const showRerunAllAction = computed<boolean>(
+  () => Boolean(props.pr) && (hasFailingChecks.value || props.rerunState.status !== 'idle'),
+);
+
+const isRerunAllPending = computed<boolean>(
+  () => props.rerunState.status === 'rerunning' && props.rerunState.jobId === null,
+);
+
+const isRerunAllQueued = computed<boolean>(
+  () => props.rerunState.status === 'queued' && props.rerunState.jobId === null,
+);
+
+const isRerunAllBusy = computed<boolean>(
+  () => props.rerunState.status === 'rerunning' || isRerunAllQueued.value,
+);
+
+const rerunAllButtonText = computed<string>(() => {
+  if (isRerunAllPending.value) {
+    return 'Re-running';
+  }
+  if (isRerunAllQueued.value) {
+    return 'Queued';
+  }
+  return 'Re-run failed';
+});
+
+const rerunAllAriaLabel = computed<string>(() => {
+  if (!props.pr) {
+    return rerunAllButtonText.value;
+  }
+  return `${rerunAllButtonText.value} checks for ${props.pr.key}`;
+});
+
+function onRerunAllClick(): void {
+  if (!props.pr || isRerunAllBusy.value) {
+    return;
+  }
+  emit('rerun-checks', props.pr);
+}
+
+function isRerunnableJob(check: PrDetailCheck): boolean {
+  return (
+    Boolean(props.pr) &&
+    check.kind === 'CheckRun' &&
+    check.bucket === 'failing' &&
+    typeof check.checkRunId === 'number' &&
+    typeof check.workflowRunId === 'number'
+  );
+}
+
+function isJobRerunning(jobId: number): boolean {
+  return props.rerunState.status === 'rerunning' && props.rerunState.jobId === jobId;
+}
+
+function isJobQueued(jobId: number): boolean {
+  return props.rerunState.status === 'queued' && props.rerunState.jobId === jobId;
+}
+
+function isJobButtonDisabled(jobId: number): boolean {
+  return props.rerunState.status === 'rerunning' || isJobQueued(jobId);
+}
+
+function jobRerunLabel(jobId: number): string {
+  if (isJobRerunning(jobId)) {
+    return 'Re-running';
+  }
+  if (isJobQueued(jobId)) {
+    return 'Queued';
+  }
+  return 'Re-run';
+}
+
+function onRerunJobClick(jobId: number): void {
+  if (!props.pr || isJobButtonDisabled(jobId)) {
+    return;
+  }
+  emit('rerun-checks', props.pr, { jobId });
 }
 </script>
 
@@ -587,9 +733,67 @@ function onSyncClick(): void {
 
 .detail-heading-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+}
+
+.detail-heading-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.checks-rerun-btn,
+.check-rerun-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-block-size: 1.5rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--accent-amber);
+  background-color: var(--accent-amber-bg);
+  color: var(--accent-amber);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.checks-rerun-btn:hover:not([aria-disabled='true']),
+.check-rerun-btn:hover:not([aria-disabled='true']) {
+  background-color: var(--accent-amber);
+  color: light-dark(#ffffff, #0b1017);
+}
+
+.checks-rerun-btn.queued,
+.check-rerun-btn.queued {
+  border-color: var(--accent-emerald);
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+}
+
+.checks-rerun-btn[aria-disabled='true'],
+.check-rerun-btn[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.check-rerun-btn {
+  flex: 0 0 auto;
+}
+
+.rerun-status-note {
+  margin: 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.35rem;
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .checks-toggle-all-btn {

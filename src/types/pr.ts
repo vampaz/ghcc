@@ -149,6 +149,8 @@ export interface PrDetailCheck {
   description: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  checkRunId?: number | null;
+  workflowRunId?: number | null;
 }
 
 export interface PrTimelineItem {
@@ -230,4 +232,13 @@ export interface RepoLabelsResponse {
 export interface UpdateLabelsResponse {
   ok: true;
   labels: PrLabel[];
+}
+
+export interface RerunFailedChecksResponse {
+  ok: true;
+  scope: 'all' | 'job' | 'run';
+  rerunCount: number;
+  runIds: number[];
+  jobId?: number;
+  message: string;
 }

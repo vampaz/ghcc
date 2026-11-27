@@ -9,6 +9,7 @@ import { GET as getPullDetail } from '@/pages/api/pull/[owner]/[repo]/[number]';
 import { POST as postToggleDraft } from '@/pages/api/pull/[owner]/[repo]/[number]/draft';
 import { POST as postPullLabels } from '@/pages/api/pull/[owner]/[repo]/[number]/labels';
 import { POST as postMergePull } from '@/pages/api/pull/[owner]/[repo]/[number]/merge';
+import { POST as postRerunFailed } from '@/pages/api/pull/[owner]/[repo]/[number]/rerun-failed';
 import { POST as postUpdateBranch } from '@/pages/api/pull/[owner]/[repo]/[number]/update-branch';
 import { isAllowedSameOriginPost, POST as postRefresh } from '@/pages/api/refresh';
 import { GET as getRepoLabels } from '@/pages/api/repo/[owner]/[repo]/labels';
@@ -20,7 +21,7 @@ import {
   fixtureArchivedRepo,
   fixtureNoCiRollup,
 } from '@/server/derive/__fixtures__/pull-requests';
-import { createGitHubClient } from '@/server/github-client';
+import { createGitHubClient, selectFailedLatestWorkflowRunIds } from '@/server/github-client';
 import { setRuntimeForTesting } from '@/server/runtime';
 import { createSnapshotService } from '@/server/snapshot-service';
 import { StateStore } from '@/server/state-store';
@@ -1389,5 +1390,337 @@ describe('API routes (mocked fetch)', () => {
       }),
     );
     expect(pullDetailFetches).toBe(3);
+  });
+
+  it('selects only the latest failed workflow run per workflow_id', () => {
+    const ids = selectFailedLatestWorkflowRunIds([
+      // Workflow 10: older failed, newer succeeded -> excluded
+      {
+        id: 1001,
+        workflow_id: 10,
+        run_number: 1,
+        status: 'completed',
+        conclusion: 'failure',
+        created_at: '2026-11-24T10:00:00.000Z',
+      },
+      {
+        id: 1002,
+        workflow_id: 10,
+        run_number: 2,
+        status: 'completed',
+        conclusion: 'success',
+        created_at: '2026-11-24T10:15:00.000Z',
+      },
+      // Workflow 20: older failed, newer failed -> pick newer 2002
+      {
+        id: 2001,
+        workflow_id: 20,
+        run_number: 1,
+        status: 'completed',
+        conclusion: 'failure',
+        created_at: '2026-11-24T10:00:00.000Z',
+      },
+      {
+        id: 2002,
+        workflow_id: 20,
+        run_number: 2,
+        status: 'completed',
+        conclusion: 'timed_out',
+        created_at: '2026-11-24T10:30:00.000Z',
+      },
+      // Workflow 30: older failed, newer in_progress -> excluded
+      {
+        id: 3001,
+        workflow_id: 30,
+        run_number: 1,
+        status: 'completed',
+        conclusion: 'failure',
+        created_at: '2026-11-24T10:00:00.000Z',
+      },
+      {
+        id: 3002,
+        workflow_id: 30,
+        run_number: 2,
+        status: 'in_progress',
+        conclusion: null,
+        created_at: '2026-11-24T10:45:00.000Z',
+      },
+      // Workflow 40: single failed run -> included
+      {
+        id: 4001,
+        workflow_id: 40,
+        run_number: 1,
+        status: 'completed',
+        conclusion: 'failure',
+        created_at: '2026-11-24T11:00:00.000Z',
+      },
+    ]);
+
+    expect(ids).toEqual([2002, 4001]);
+  });
+
+  it('re-runs failed GitHub Actions workflow runs and individual jobs via POST /api/pull/:owner/:repo/:number/rerun-failed', async () => {
+    const headSha = 'a'.repeat(40);
+    const rerunPostUrls: string[] = [];
+
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+
+      if (url === 'https://api.github.com/graphql') {
+        const parsed = JSON.parse(String(init?.body ?? '{}')) as { query?: string };
+        if (parsed.query?.includes('query PullDetail')) {
+          return jsonResponse({
+            data: {
+              repository: {
+                pullRequest: {
+                  number: 42,
+                  title: 'fix: flaky suite',
+                  url: 'https://github.com/acme/core-api/pull/42',
+                  isDraft: false,
+                  bodyText: '',
+                  bodyHTML: '',
+                  baseRefName: 'main',
+                  headRefName: 'fix/flaky',
+                  latestReviews: { nodes: [] },
+                  reviewRequests: { nodes: [] },
+                  commits: {
+                    nodes: [
+                      {
+                        commit: {
+                          statusCheckRollup: {
+                            contexts: {
+                              totalCount: 2,
+                              nodes: [
+                                {
+                                  __typename: 'CheckRun',
+                                  databaseId: 55501,
+                                  name: 'unit-tests',
+                                  status: 'COMPLETED',
+                                  conclusion: 'FAILURE',
+                                  detailsUrl: 'https://github.com/acme/core-api/actions/runs/9001',
+                                  startedAt: '2026-11-24T10:00:00.000Z',
+                                  completedAt: '2026-11-24T10:05:00.000Z',
+                                  checkSuite: { workflowRun: { databaseId: 9001 } },
+                                },
+                                {
+                                  __typename: 'CheckRun',
+                                  databaseId: 55502,
+                                  name: 'external-ci',
+                                  status: 'COMPLETED',
+                                  conclusion: 'FAILURE',
+                                  detailsUrl: 'https://ci.example.com/build/1',
+                                  startedAt: '2026-11-24T10:00:00.000Z',
+                                  completedAt: '2026-11-24T10:05:00.000Z',
+                                  checkSuite: { workflowRun: null },
+                                },
+                              ],
+                            },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                  timelineItems: { nodes: [] },
+                },
+              },
+            },
+          });
+        }
+      }
+
+      if (
+        method === 'GET' &&
+        url ===
+          `https://api.github.com/repos/acme/core-api/actions/runs?head_sha=${headSha}&per_page=100`
+      ) {
+        return jsonResponse({
+          workflow_runs: [
+            {
+              id: 9000,
+              workflow_id: 1,
+              run_number: 1,
+              status: 'completed',
+              conclusion: 'failure',
+              created_at: '2026-11-24T09:00:00.000Z',
+            },
+            {
+              id: 9001,
+              workflow_id: 1,
+              run_number: 2,
+              status: 'completed',
+              conclusion: 'failure',
+              created_at: '2026-11-24T10:00:00.000Z',
+            },
+          ],
+        });
+      }
+
+      if (
+        method === 'POST' &&
+        url === 'https://api.github.com/repos/acme/core-api/actions/runs/9001/rerun-failed-jobs'
+      ) {
+        rerunPostUrls.push(url);
+        return new Response(null, { status: 201 });
+      }
+
+      if (
+        method === 'POST' &&
+        url === 'https://api.github.com/repos/acme/core-api/actions/jobs/55501/rerun'
+      ) {
+        rerunPostUrls.push(url);
+        return new Response(null, { status: 201 });
+      }
+
+      if (
+        method === 'POST' &&
+        url === 'https://api.github.com/repos/acme/core-api/actions/jobs/99999/rerun'
+      ) {
+        return jsonResponse({ message: `Resource not accessible by ${TEST_SECRET}` }, 403);
+      }
+
+      return jsonResponse({ workflow_runs: [] });
+    });
+
+    await setupRuntime(fetchFn);
+
+    // Pull detail exposes Actions checkRunId & workflowRunId while leaving external checks null
+    const detailRes = await getPullDetail(
+      makeApiContext(new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42'), {
+        owner: 'acme',
+        repo: 'core-api',
+        number: '42',
+      }),
+    );
+    expect(detailRes.status).toBe(200);
+    const detail = (await detailRes.json()) as {
+      checks: Array<{ name: string; checkRunId?: number | null; workflowRunId?: number | null }>;
+    };
+    expect(detail.checks[0]?.checkRunId).toBe(55501);
+    expect(detail.checks[0]?.workflowRunId).toBe(9001);
+    expect(detail.checks[1]?.checkRunId).toBe(55502);
+    expect(detail.checks[1]?.workflowRunId).toBeNull();
+
+    // Cross-origin POST is rejected with 403
+    const crossOrigin = await postRerunFailed(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/rerun-failed', {
+          method: 'POST',
+          headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+          body: JSON.stringify({ expectedHeadSha: headSha }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(crossOrigin.status).toBe(403);
+
+    // Providing both jobId and runId returns 400
+    const badBody = await postRerunFailed(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/rerun-failed', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ jobId: 55501, runId: 9001 }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(badBody.status).toBe(400);
+
+    // PR-wide rerun targets only latest failed workflow run 9001 and returns 202
+    const allRes = await postRerunFailed(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/rerun-failed', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expectedHeadSha: headSha }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(allRes.status).toBe(202);
+    expect(await allRes.json()).toMatchObject({
+      ok: true,
+      scope: 'all',
+      rerunCount: 1,
+      runIds: [9001],
+    });
+
+    // Single job rerun targets /actions/jobs/55501/rerun and returns 202
+    const jobRes = await postRerunFailed(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/rerun-failed', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ jobId: 55501 }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(jobRes.status).toBe(202);
+    expect(await jobRes.json()).toMatchObject({
+      ok: true,
+      scope: 'job',
+      rerunCount: 1,
+      jobId: 55501,
+    });
+    expect(rerunPostUrls).toEqual([
+      'https://api.github.com/repos/acme/core-api/actions/runs/9001/rerun-failed-jobs',
+      'https://api.github.com/repos/acme/core-api/actions/jobs/55501/rerun',
+    ]);
+
+    // 403 error redacts token and adds Actions permission hint
+    const forbiddenRes = await postRerunFailed(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/rerun-failed', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ jobId: 99999 }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(forbiddenRes.status).toBe(403);
+    const forbiddenText = await forbiddenRes.text();
+    expect(forbiddenText).not.toContain(TEST_SECRET);
+    expect(forbiddenText).toContain('Actions write permission');
+
+    // Commit with no failed Actions runs returns 409
+    const noneRes = await postRerunFailed(
+      makeApiContext(
+        new Request('http://127.0.0.1:4321/api/pull/acme/core-api/42/rerun-failed', {
+          method: 'POST',
+          headers: {
+            'sec-fetch-site': 'same-origin',
+            origin: 'http://127.0.0.1:4321',
+            host: '127.0.0.1:4321',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expectedHeadSha: 'b'.repeat(40) }),
+        }),
+        { owner: 'acme', repo: 'core-api', number: '42' },
+      ),
+    );
+    expect(noneRes.status).toBe(409);
   });
 });

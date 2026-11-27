@@ -25,8 +25,10 @@
           :merge-state="mergeStates[pr.key]"
           :repo-labels-state="repoLabelsStates[pr.repository]"
           :label-state="labelStates[pr.key]"
+          :rerun-state="rerunStates[pr.key]"
           @select="$emit('select', $event)"
           @sync="$emit('sync', $event)"
+          @rerun-checks="$emit('rerun-checks', $event)"
           @toggle-draft="(target, nextDraft) => $emit('toggle-draft', target, nextDraft)"
           @request-merge="(target, method) => $emit('request-merge', target, method)"
           @load-labels="$emit('load-labels', $event)"
@@ -49,6 +51,7 @@ import type {
   PrDraftState,
   PrLabelsState,
   PrMergeState,
+  PrRerunState,
   PrSyncState,
   RepoLabelsState,
 } from '@/composables/use-dashboard-state';
@@ -67,6 +70,7 @@ interface Props {
   mergeStates?: Record<string, PrMergeState>;
   repoLabelsStates?: Record<string, RepoLabelsState>;
   labelStates?: Record<string, PrLabelsState>;
+  rerunStates?: Record<string, PrRerunState>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -75,11 +79,13 @@ const props = withDefaults(defineProps<Props>(), {
   mergeStates: () => ({}),
   repoLabelsStates: () => ({}),
   labelStates: () => ({}),
+  rerunStates: () => ({}),
 });
 
 defineEmits<{
   select: [pr: PrView];
   sync: [pr: PrView];
+  'rerun-checks': [pr: PrView];
   'toggle-draft': [pr: PrView, nextDraft: boolean];
   'request-merge': [pr: PrView, method: MergeMethod];
   'load-labels': [pr: PrView];
