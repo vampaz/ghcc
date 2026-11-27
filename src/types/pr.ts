@@ -144,12 +144,23 @@ export interface SnapshotCounts {
   draft: number;
 }
 
+export interface CiOutageAlert {
+  id: string;
+  repository: string;
+  checkName: string;
+  affectedCount: number;
+  affectedPrKeys: string[];
+  authors: string[];
+  sampleUrl: string | null;
+}
+
 export interface SnapshotResponse {
   fetchedAt: string;
   viewer: { login: string };
   state: SnapshotState;
   counts: SnapshotCounts;
   pullRequests: PrView[];
+  ciOutages?: CiOutageAlert[];
   rateLimit: {
     graphql: RateLimitBucket | null;
     core: RateLimitBucket | null;

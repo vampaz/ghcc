@@ -2585,4 +2585,63 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('displays shared CI outage banner, badges affected cards, filters affected PRs, and supports dismiss', async () => {
+    const snap = makeSnapshot({
+      ciOutages: [
+        {
+          id: 'acme/core-api::e2e-suite',
+          repository: 'acme/core-api',
+          checkName: 'e2e-suite',
+          affectedCount: 3,
+          affectedPrKeys: ['acme/core-api#101', 'acme/core-api#102', 'acme/core-api#103'],
+          authors: ['vampaz', 'ana', 'leo'],
+          sampleUrl: 'https://github.com/acme/core-api/runs/1',
+        },
+      ],
+    });
+    // Ensure #101's failing check matches e2e-suite
+    snap.pullRequests[0]!.ci.failing = [
+      { name: 'e2e-suite', url: 'https://github.com/acme/core-api/runs/1' },
+    ];
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/presets') {
+        return new Response(JSON.stringify({ presets: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(snap), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"outage-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    const banner = wrapper.find('.outage-strip');
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain('e2e-suite');
+    expect(banner.text()).toContain('acme/core-api');
+
+    // Affected card shows 'shared CI' badge
+    expect(wrapper.find('.action-queue .pr-card').text()).toContain('shared CI');
+
+    // Clicking 'Filter affected' filters queue to matching failing PRs
+    await banner.find('.outage-action-btn.primary').trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.action-queue .pr-card')).toHaveLength(1);
+    expect(wrapper.find('.action-queue .pr-card').text()).toContain('acme/core-api#101');
+
+    // Dismissing hides the outage banner
+    await banner.find('.outage-dismiss-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.outage-strip').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
 });

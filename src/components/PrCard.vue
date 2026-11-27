@@ -37,6 +37,14 @@
               <span v-if="isPinned" class="tag" data-tone="blue">pinned</span>
               <span v-if="isSnoozed" class="tag" data-tone="muted">{{ snoozeBadgeText }}</span>
               <span
+                v-if="sharedCiChecks.length > 0"
+                class="tag"
+                data-tone="red"
+                :title="`Shared CI outage affecting multiple PRs: ${sharedCiChecks.join(', ')}`"
+              >
+                shared CI
+              </span>
+              <span
                 v-if="(pr.unresolvedThreadCount ?? 0) > 0"
                 class="tag mono-num"
                 data-tone="amber"
@@ -298,6 +306,7 @@ interface Props {
   labelState?: PrLabelsState;
   rerunState?: PrRerunState;
   triageState?: PrTriageState;
+  sharedCiChecks?: string[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -310,6 +319,7 @@ const props = withDefaults(defineProps<Props>(), {
   labelState: () => IDLE_PR_LABELS_STATE,
   rerunState: () => IDLE_PR_RERUN_STATE,
   triageState: () => IDLE_PR_TRIAGE_STATE,
+  sharedCiChecks: () => [],
 });
 
 const emit = defineEmits<{
@@ -689,6 +699,12 @@ const diffWidths = computed(() => {
   background-color: var(--accent-blue-bg);
   color: var(--accent-blue);
   border-color: var(--accent-blue);
+}
+
+.tag[data-tone='red'] {
+  background-color: var(--accent-red-bg);
+  color: var(--accent-red);
+  border-color: color-mix(in srgb, var(--accent-red) 55%, transparent);
 }
 
 .pr-title {

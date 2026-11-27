@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { TokenStore } from '@/server/auth';
+import { deriveCiOutages } from '@/server/derive/ci-outages';
 import {
   computeCounts,
   isActivePullRequest,
@@ -215,6 +216,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
             const hydratedSnapshot: SnapshotResponse = {
               ...persisted.snapshot,
               pullRequests: triaged.pullRequests,
+              ciOutages: deriveCiOutages(triaged.pullRequests),
             };
             cachedResult = {
               snapshot: hydratedSnapshot,
@@ -575,6 +577,7 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         state: lifecycle === 'degraded' ? 'degraded' : 'ready',
         counts: computeCounts(triaged.pullRequests),
         pullRequests: triaged.pullRequests,
+        ciOutages: deriveCiOutages(triaged.pullRequests),
         rateLimit: {
           graphql: lastGraphqlLimit,
           core: lastCoreLimit,

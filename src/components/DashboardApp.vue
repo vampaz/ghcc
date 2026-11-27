@@ -30,6 +30,13 @@
       @retry="fetchSnapshot(true)"
     />
 
+    <CiOutageBanner
+      :outages="ciOutages"
+      :dismissed-signatures="dismissedOutageSignatures"
+      @filter-outage="onFilterOutage"
+      @dismiss="onDismissOutage"
+    />
+
     <main class="dashboard-main">
       <div class="dashboard-controls">
         <KpiStrip
@@ -92,6 +99,7 @@
           :label-states="labelStates"
           :rerun-states="rerunStates"
           :triage-states="triageStates"
+          :shared-ci-by-key="sharedCiByKey"
           @select="onSelectPr"
           @toggle-check="onToggleCheck"
           @sync="syncPullRequest"
@@ -375,6 +383,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import ActionQueue from '@/components/ActionQueue.vue';
 import AppHeader from '@/components/AppHeader.vue';
 import BulkActionBar from '@/components/BulkActionBar.vue';
+import CiOutageBanner from '@/components/CiOutageBanner.vue';
 import CommandPaletteDialog from '@/components/CommandPaletteDialog.vue';
 import FilterBar from '@/components/FilterBar.vue';
 import KpiStrip from '@/components/KpiStrip.vue';
@@ -392,7 +401,13 @@ import {
   toggleRepoInSelection,
   useUrlState,
 } from '@/composables/use-url-state';
-import type { MergeMethod, PrView, SavedFilterPreset, SnoozeCondition } from '@/types/pr';
+import type {
+  CiOutageAlert,
+  MergeMethod,
+  PrView,
+  SavedFilterPreset,
+  SnoozeCondition,
+} from '@/types/pr';
 import { IDLE_BULK_ACTION_STATE, runBulkAction, type BulkActionState } from '@/utils/bulk-runner';
 import type { PaletteCommand } from '@/utils/command-palette';
 import {
@@ -558,6 +573,43 @@ const cursorKey = ref<string | null>(null);
 const isDesktop = ref<boolean>(true);
 
 const allPullRequests = computed<PrView[]>(() => snapshot.value?.pullRequests ?? []);
+const ciOutages = computed<CiOutageAlert[]>(() => snapshot.value?.ciOutages ?? []);
+const dismissedOutageSignatures = ref<Set<string>>(new Set());
+
+const sharedCiByKey = computed<Record<string, string[]>>(() => {
+  const map: Record<string, string[]> = {};
+  for (const outage of ciOutages.value) {
+    for (const key of outage.affectedPrKeys) {
+      const existing = map[key];
+      if (existing) {
+        if (!existing.includes(outage.checkName)) {
+          existing.push(outage.checkName);
+        }
+      } else {
+        map[key] = [outage.checkName];
+      }
+    }
+  }
+  return map;
+});
+
+function onDismissOutage(signature: string): void {
+  const next = new Set(dismissedOutageSignatures.value);
+  next.add(signature);
+  dismissedOutageSignatures.value = next;
+}
+
+function onFilterOutage(outage: CiOutageAlert): void {
+  applyFilters({
+    view: 'all',
+    bucket: 'ci-failing',
+    q: outage.checkName,
+    repoSelection: { mode: 'subset', repos: [outage.repository] },
+    drafts: false,
+    snoozed: false,
+    staleOnly: false,
+  });
+}
 
 function matchesOwnership(pr: PrView): boolean {
   if (view.value === 'mine') {
@@ -589,7 +641,8 @@ function matchesSearchAndRepo(pr: PrView): boolean {
     pr.blockerSummary.toLowerCase().includes(query) ||
     pr.headRefName.toLowerCase().includes(query) ||
     pr.author.toLowerCase().includes(query) ||
-    pr.labels.some((label) => label.name.toLowerCase().includes(query))
+    pr.labels.some((label) => label.name.toLowerCase().includes(query)) ||
+    pr.ci.failing.some((check) => check.name.toLowerCase().includes(query))
   );
 }
 

@@ -63,6 +63,7 @@
           :label-state="labelStates[pr.key]"
           :rerun-state="rerunStates[pr.key]"
           :triage-state="triageStates[pr.key]"
+          :shared-ci-checks="sharedCiByKey[pr.key]"
           @select="$emit('select', $event)"
           @toggle-check="(target, shiftKey) => $emit('toggle-check', target, shiftKey)"
           @sync="$emit('sync', $event)"
@@ -121,6 +122,7 @@ interface Props {
   labelStates?: Record<string, PrLabelsState>;
   rerunStates?: Record<string, PrRerunState>;
   triageStates?: Record<string, PrTriageState>;
+  sharedCiByKey?: Record<string, string[]>;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -137,6 +139,7 @@ const props = withDefaults(defineProps<Props>(), {
   labelStates: () => ({}),
   rerunStates: () => ({}),
   triageStates: () => ({}),
+  sharedCiByKey: () => ({}),
 });
 
 defineEmits<{
