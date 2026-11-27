@@ -1,27 +1,57 @@
-# ghcc — Local Pull Request Command Center
+# ghcc — GitHub Command Center
 
-A local and self-hosted web dashboard for pull requests you authored, pull requests awaiting your review, and teammates' open pull requests across your active repositories—with branch sync and draft/ready toggling, backed by your `gh` CLI login or a GitHub token.
+A local and self-hosted web dashboard for pull requests you authored, pull requests awaiting your review, and teammates' open pull requests across your active repositories—with branch sync, draft/ready toggling, label editing, and squash/merge actions, backed by your `gh` CLI login or a GitHub token.
 
 ## Features
 
-- **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); full-width **Action Queue** (including your authored waiting PRs) alongside a **Waiting on Others** quick-jump panel and `stale` badge after 3+ idle days.
-- **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, and blocker summary; multi-repository checkboxes with a tri-state toggle-all in the top-bar **All repos** dropdown; URL-synced filter state.
-- **Non-modal PR inspector**: Slide-over right sidebar showing full CI checks, reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
-- **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), and `Sync` button to merge the base branch into behind-base PRs (GitHub `update-branch` REST API), all same-origin protected.
-- **Live polling & theme**: Configurable auto-refresh (`60s` default) with tab-focus catch-up plus manual refresh (`r`), GraphQL rate-limit indicator, and light/dark mode toggle.
+- **Priority queue & KPIs**: Scoped **Needs You**, **Ready to Merge**, **Waiting on Others**, and **CI Health** tiles (click any tile to filter); prioritized **Action Queue** (including your authored waiting PRs) alongside a side rail with **Ready to Merge** and **Waiting on Others** quick-jump panels, plus a `stale` badge after more than 3 idle days.
+- **Filtering & search**: `All`, `Mine`, `To Review`, and `Team` views; `Include drafts` checkbox; instant search (`/`) across repo, number, title, branch, author, labels, and blocker summary; multi-repository checkboxes with a tri-state **Select all** toggle in the filter bar's **All repos** dropdown; URL-synced filter state.
+- **Non-modal PR inspector**: Slide-over right sidebar on desktop (inline expansion on narrow screens) showing sanitized GitHub Markdown PR descriptions, inline and fullscreen interactive Mermaid diagrams, grouped collapsible CI checks (up to 100), reviewers, and the last 5 timeline events without dimming the dashboard—click directly between PR cards to switch in place, or dismiss with an outside click or `Esc`.
+- **Pull request actions**: Per-PR GitHub-style `Labels` dropdown picker, `Squash / Merge` split button (with confirmation dialog and GitHub REST merge), `Ready | Draft` toggle (GitHub GraphQL mutations), and `Sync` button to merge the base branch into behind-base PRs (including drafts, via GitHub's `update-branch` REST API), all same-origin protected.
+- **Live polling & theme**: Configurable auto-refresh (`60s` default; `60s`, `120s`, or `5m`) with tab-focus catch-up plus manual refresh (`r`), GraphQL (`GQL`) and REST (`REST`) rate-limit indicators, live refresh status, and light/dark mode toggle.
+
+## Choose Your Setup
+
+- **[Run with Docker](#run-with-docker)** — Best for running `ghcc` locally without installing Node.js, or hosting it continuously on a LAN / home server.
+- **[Local Development (Bare-Metal)](#local-development-bare-metal)** — Best for contributing to `ghcc`, editing code with hot reload, or running directly with Node.js `24` and your existing `gh` CLI login.
+
+> **Port conflict note:** Both Docker and bare-metal default to port `4321`. Do not run them on the same port at the same time—stop one first or override `PORT`.
+
+## GitHub Credentials
+
+`ghcc` fails closed at startup: it verifies your credential against GitHub GraphQL (`viewer { login }`) before serving traffic and exits non-zero if authentication is missing or rejected.
+
+Credential resolution order (`src/server/boot-check.mjs`):
+
+1. `GH_TOKEN_FILE` — path to a file containing the token
+2. `GH_TOKEN` — token passed via environment variable or Docker `.env`
+3. `GITHUB_TOKEN` — alternate token environment variable
+4. `gh auth status` + `gh auth token` — authenticated [GitHub CLI (`gh`)](https://cli.github.com/) session (bare-metal only; `gh` is not installed inside the Docker image)
+
+### Token permissions
+
+If you use a Personal Access Token (required for persistent Docker setups and optional for bare-metal):
+
+- **Classic PAT**:
+  - `repo` scope for private repositories (`public_repo` for public repositories only).
+- **Fine-grained PAT**:
+  - Scoped to a **single resource owner** (either your personal account or one organization). If your PRs span multiple organizations or personal + org repositories, use a Classic PAT or `gh auth login` instead.
+  - **Viewing only**: **Metadata** (Read-only, granted automatically), **Pull requests** (Read-only), **Contents** (Read-only, used for behind-base draft detection), **Checks** (Read-only), and **Commit statuses** (Read-only).
+  - **Full PR actions** (`Sync`, `Ready | Draft`, `Labels`, `Squash / Merge`): upgrade **Pull requests** and **Contents** to **Read and write** (and **Issues** to **Read and write** if your repository enforces it for PR labels).
+- **Organizations with SAML SSO**:
+  - Classic PATs must be authorized for the organization (**Configure SSO** in GitHub token settings).
+  - Fine-grained PATs must be scoped to (and, if required, approved by) the organization.
+
+---
 
 ## Run with Docker
 
-Anyone can run `ghcc` in a Docker container on a local machine (Docker Desktop, OrbStack, Linux Docker Engine) or a LAN home server.
+You can run `ghcc` in Docker on a local machine (Docker Desktop, OrbStack, or Linux Docker Engine) or an always-on LAN / home server.
 
 ### 1. Prerequisites
 
-- Docker and Docker Compose (`docker compose version`)
-- A GitHub credential—either:
-  - an authenticated [GitHub CLI (`gh`)](https://cli.github.com/) session (`gh auth login`), or
-  - a GitHub Personal Access Token:
-    - **Classic PAT**: `repo` scope for private repositories (`public_repo` for public repositories only).
-    - **Fine-grained PAT**: **Pull requests** (Read and write) and **Contents** (Read and write) to use `Sync` and `Ready | Draft` actions, or Read-only for viewing only.
+- Docker and Docker Compose v2 (`docker compose version`)
+- A GitHub credential—either an authenticated `gh` CLI session on your host (`gh auth login`) or a GitHub PAT (see [Token permissions](#token-permissions))
 
 ### 2. Clone the repository
 
@@ -32,43 +62,63 @@ cd ghcc
 
 ### 3. Start the container
 
-Choose the credential setup that fits your machine:
+Pick the option that matches how you plan to run `ghcc`:
 
-#### Option A — Quick local start (token in memory via `gh` CLI)
+#### Option A — Quick local start (token from `gh` CLI, loopback only)
 
-```sh
-GH_TOKEN="$(gh auth token)" docker compose up -d --build --wait
-```
-
-Open [http://127.0.0.1:4321](http://127.0.0.1:4321) or [http://localhost:4321](http://localhost:4321).
-
-To restrict host port publishing to loopback only (recommended on shared networks):
+Best for trying `ghcc` on your laptop or desktop without writing a token to disk. Requires an active `gh` CLI login (`gh auth status`) on the host. Binding to `127.0.0.1` keeps the dashboard reachable only from your machine:
 
 ```sh
 GHCC_BIND_HOST=127.0.0.1 GH_TOKEN="$(gh auth token)" docker compose up -d --build --wait
 ```
 
-#### Option B — Persistent server or LAN machine (survives reboots via `.env`)
+Once healthy, open [http://127.0.0.1:4321](http://127.0.0.1:4321) or [http://localhost:4321](http://localhost:4321).
 
-Create an untracked, owner-only `.env` file next to `compose.yaml` (`.env` is gitignored):
+> **Note:** Docker stores the resolved environment variable on the container, so automatic container restarts keep working. If you later recreate the container (`docker compose up -d` or `docker compose down` followed by `up`), pass `GH_TOKEN="$(gh auth token)"` again or switch to Option B.
+
+#### Option B — Persistent local or LAN server (`.env` file)
+
+Best for a home server, Raspberry Pi, or any machine where you want `docker compose up -d` to work without passing `GH_TOKEN` on every command.
+
+Create an untracked, owner-only `.env` file next to `compose.yaml` (`.env` is gitignored and excluded by `.dockerignore`):
 
 ```sh
 cat <<'EOF' > .env
-GH_TOKEN=ghp_your_token_here
+GH_TOKEN=your_github_token_here
+# Use 127.0.0.1 for local-only access, or 0.0.0.0 to expose on your LAN:
+GHCC_BIND_HOST=0.0.0.0
 # Optional overrides:
 # PORT=4321
-# GHCC_BIND_HOST=0.0.0.0
 # GHCC_ALLOWED_HOSTS=my-server.local
 EOF
 chmod 600 .env
 docker compose up -d --build --wait
 ```
 
+Open `http://<server-ip-or-hostname>:4321` (or `http://127.0.0.1:4321` on the same machine).
+
 #### Option C — Mounted secret file (`GH_TOKEN_FILE`)
 
-Mount a read-only file containing your token into the container (for example `/run/secrets/gh_token`) and set `GH_TOKEN_FILE=/run/secrets/gh_token`.
+Best when you manage secrets outside `.env` (for example Docker secrets, systemd credentials, or a host secret file).
 
-### Docker configuration & custom hostnames
+Store the token file **outside the repository directory** (for example `/etc/ghcc/gh_token` or `~/.config/ghcc/gh_token`) so it is never copied into the Docker build context or committed to Git. Make sure it is readable by the container's non-root `node` user (UID `1000`—on Linux, e.g. `chown 1000:1000` and `chmod 400`), then create an extra Compose file outside the repository (for example `/etc/ghcc/compose.secrets.yaml`):
+
+```yaml
+services:
+  ghcc:
+    environment:
+      GH_TOKEN_FILE: /run/secrets/gh_token
+    volumes:
+      - /etc/ghcc/gh_token:/run/secrets/gh_token:ro
+```
+
+Start with both files:
+
+```sh
+docker compose -f compose.yaml -f /etc/ghcc/compose.secrets.yaml up -d --build --wait
+```
+
+### 4. Docker configuration reference
 
 | Variable             | Default (`compose.yaml`)         | Purpose                                                                                 |
 | -------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
@@ -79,56 +129,127 @@ Mount a read-only file containing your token into the container (for example `/r
 | `GHCC_BIND_HOST`     | `0.0.0.0`                        | Host interface to bind (`127.0.0.1` for local-only access)                              |
 | `GHCC_ALLOWED_HOSTS` | _(unset — any same-origin host)_ | Optional comma-separated host allowlist for same-origin `POST` routes and proxy headers |
 
-- **Any host out of the box**: You can access `ghcc` via `localhost`, an IP address, a LAN hostname (e.g. `http://my-server.local:4321`), or a reverse proxy without extra configuration—same-origin `POST` routes (`/api/refresh`, `Sync`, `Ready | Draft`) verify that `Origin` and `Sec-Fetch-Site` match the request host. If you want to restrict access to specific hostnames (or explicitly trust forwarded proxy headers in Astro), set `GHCC_ALLOWED_HOSTS=host1,host2` in `.env` and rebuild (`docker compose up -d --build`).
-- **Fail-closed startup & healthcheck**: The container runs as non-root `node`, verifies the token against GitHub GraphQL (`viewer { login }`) before serving traffic, and exposes a built-in Docker `HEALTHCHECK` against `/api/health`.
-- **Persistent cache**: Mergeability cache data persists in the `ghcc-cache` Docker volume (`/app/.cache`).
+### 5. Networking, security, and persistence
 
-### Container lifecycle
+- **No built-in user login**: Anyone who can reach the `ghcc` web UI acts with your configured GitHub token. On shared or untrusted networks, bind to `GHCC_BIND_HOST=127.0.0.1` or place `ghcc` behind a VPN (such as Tailscale) or an authenticating reverse proxy.
+- **Any host out of the box**: You can access `ghcc` via `localhost`, an IP address, a LAN hostname (e.g. `http://my-server.local:4321`), or a reverse proxy without extra configuration. All mutating `POST` routes (`/api/refresh`, `Sync`, `Ready | Draft`, `Labels`, `Squash / Merge`) verify that `Origin` and `Sec-Fetch-Site` match `Host` or `X-Forwarded-Host`.
+- **Restricting hosts / reverse proxy allowlist**: Set `GHCC_ALLOWED_HOSTS=ghcc.example.com,my-server.local` in `.env` and **rebuild** (`docker compose up -d --build --wait`) so the value is applied both at build time (Astro `security.allowedDomains`) and at runtime (loopback plus your allowlist).
+- **Non-root container & healthcheck**: The container runs as the non-root `node` user (UID `1000`), verifies the token at startup, and includes a Docker `HEALTHCHECK` against `/api/health`.
+- **Persistent cache**: The `ghcc-cache` Docker volume (`/app/.cache/state.json`) stores the last snapshot (for instant warm restarts), mergeability cache and probe counters, and draft branch comparisons.
+
+### 6. Updating and container lifecycle
 
 ```sh
-docker compose ps       # Check health and port mapping
-docker compose logs -f  # Inspect startup and runtime logs
-docker compose down     # Stop and remove the container (keeps ghcc-cache volume)
+docker compose ps                     # Check container health and port mapping
+docker compose logs -f                # Follow startup and runtime logs
+docker compose restart                # Restart the container
+docker compose down                   # Stop and remove the container (keeps ghcc-cache volume)
+docker compose down -v                # Stop and remove container AND cached state volume
 ```
 
-Do not run the bare-metal server and the Docker container on port `4321` at the same time—stop one first or set a different `PORT`.
-
-## Run Locally (Bare-Metal)
-
-### Prerequisites
-
-- Node.js `>= 24` (see `.nvmrc`)
-- [GitHub CLI (`gh`)](https://cli.github.com/) authenticated (`gh auth login`), or `GH_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN_FILE` set in the environment.
-
-### Development server
+To pull updates and rebuild (if you used Option A instead of `.env`, include `GHCC_BIND_HOST=127.0.0.1 GH_TOKEN="$(gh auth token)"`; if you used Option C, include `-f compose.yaml -f /etc/ghcc/compose.secrets.yaml`):
 
 ```sh
+git pull
+docker compose up -d --build --wait
+```
+
+---
+
+## Local Development (Bare-Metal)
+
+Use bare-metal mode to develop `ghcc`, run tests, or run directly on your machine with Node.js.
+
+### 1. Prerequisites
+
+- **Node.js `24`** (matching `.nvmrc`; if you use `nvm`, run `nvm use`)
+- **GitHub credentials**—either:
+  - authenticated [GitHub CLI (`gh`)](https://cli.github.com/):
+    ```sh
+    gh auth login
+    gh auth status
+    ```
+  - or an exported `GH_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN_FILE` environment variable in your shell.
+
+> **Note:** Unlike Docker Compose, bare-metal `npm run dev` and `npm run start` do **not** automatically load a `.env` file for boot-time credential checks. Either stay logged in with `gh auth login` or export `GH_TOKEN` in your shell.
+
+### 2. Install dependencies
+
+```sh
+git clone https://github.com/vampaz/ghcc.git
+cd ghcc
+nvm use        # Optional, if using nvm
 npm install
+```
+
+### 3. Start the development server
+
+```sh
 npm run dev
 ```
 
-Open [http://127.0.0.1:4321](http://127.0.0.1:4321). To use another port:
+This starts Astro 7 + Vue 3 with hot reload on [http://127.0.0.1:4321](http://127.0.0.1:4321). Press `Ctrl+C` to stop it.
+
+To bind to a different port (or address—keep `127.0.0.1` on untrusted networks since `ghcc` has no built-in login):
 
 ```sh
 PORT=4400 npm run dev
 ```
 
-Astro 7 starts `astro dev` as a background daemon. Manage it with:
+#### Optional: Background dev server
+
+Astro 7 also supports running the dev server detached in the background (and automatically backgrounds it when invoked by supported AI coding agents):
 
 ```sh
+npm run dev -- --background
 ./node_modules/.bin/astro dev status
-./node_modules/.bin/astro dev logs
+./node_modules/.bin/astro dev logs --follow
 ./node_modules/.bin/astro dev stop
 ```
 
-### Production build & start
+### 4. Local production build & start
+
+To test the standalone production Node server locally (the same entrypoint used in Docker):
 
 ```sh
 npm run build
 npm run start
 ```
 
-The bare-metal server binds to `127.0.0.1:4321` by default (`HOST` and `PORT` can override) and fails closed at boot if credentials are missing or rejected by GitHub.
+`scripts/start.mjs` defaults to `HOST=127.0.0.1` and `PORT=4321` (override with `HOST` and `PORT`) and fails closed at boot if GitHub credentials are missing or invalid. If you use `GHCC_ALLOWED_HOSTS`, set it for both `npm run build` and `npm run start`.
+
+### 5. Linting, formatting, typechecking, and unit tests
+
+```sh
+npm run lint          # Oxlint
+npm run format:check  # Oxfmt check (run `npm run format` to auto-format)
+npm run typecheck     # Astro check + vue-tsc
+npm run test          # Vitest unit & component suite (mocked, no GitHub API calls)
+```
+
+Run a single test file:
+
+```sh
+npm run test -- src/components/DashboardApp.spec.ts
+```
+
+### 6. End-to-End Tests (Playwright)
+
+Install the Playwright Chromium browser once (add `--with-deps` on Linux):
+
+```sh
+./node_modules/.bin/playwright install chromium
+```
+
+Run the browser suite against a production build with mocked fixtures:
+
+```sh
+npm run test:e2e
+```
+
+Playwright builds the app and starts `node scripts/start.mjs` on `http://127.0.0.1:4330` with `GHCC_SKIP_BOOT_CHECK=1`. Tests intercept `/api/snapshot` with local fixtures, so no GitHub credentials are required.
+
+---
 
 ## Keyboard Shortcuts
 
@@ -137,41 +258,28 @@ The bare-metal server binds to `127.0.0.1:4321` by default (`HOST` and `PORT` ca
 - `o` — open the focused or selected pull request on GitHub
 - `r` — trigger a manual refresh (10s cooldown)
 - `/` — focus the search input
-- `Esc` — close the inspector or clear active filters
+- `Esc` — close the inspector, clear/blur search, or clear active filters
+- In fullscreen Mermaid diagram view: `+` / `-` to zoom, `0` to fit to viewport, `Esc` to close
 
 ## API Routes
 
 - `GET /api/health` — verifies GitHub auth status, active login, and token source (`gh-cli` or `env`)
-- `GET /api/snapshot` — returns normalized pull request buckets, counts, rate limits, and warnings (supports `ETag` / `304`)
+- `GET /api/snapshot` — returns normalized pull request buckets, counts, rate limits, and warnings (supports `ETag` / `304`, `?wait=1` for in-flight refreshes, and `X-GHCC-Refreshing: 1`)
 - `POST /api/refresh` — forces a snapshot refresh (same-origin protected, 10s cooldown)
-- `GET /api/pull/{owner}/{repo}/{number}` — loads full checks, reviewers, and last 5 timeline items for the inspector
+- `GET /api/pull/{owner}/{repo}/{number}` — loads sanitized PR description HTML/excerpt, full checks (up to 100), reviewers, and last 5 timeline items for the inspector
 - `POST /api/pull/{owner}/{repo}/{number}/update-branch` — merges the base branch into a behind pull request branch via GitHub's `update-branch` API (same-origin protected)
 - `POST /api/pull/{owner}/{repo}/{number}/draft` — converts a pull request to draft or marks it ready for review via GitHub GraphQL (same-origin protected)
 - `GET /api/repo/{owner}/{repo}/labels` — lists repository labels (name, hex color, description) for the label picker
 - `POST /api/pull/{owner}/{repo}/{number}/labels` — sets pull request labels via GitHub's issues labels API (same-origin protected)
 - `POST /api/pull/{owner}/{repo}/{number}/merge` — merges a pull request via GitHub's merge API (`squash` by default or `merge` commit, same-origin protected)
 
-## Checks
+## Troubleshooting
 
-```sh
-npm run lint
-npm run format:check
-npm run typecheck
-npm run test
-```
+- **Container fails healthcheck or exits immediately**: Run `docker compose logs` to see the boot-check error. The most common cause is an unset or expired `GH_TOKEN` (remember `gh` CLI is not available inside the container).
+- **Port `4321` already in use**: Check whether the other mode (Docker vs `npm run dev` / `npm run start`) is still running (`docker compose ps` or `./node_modules/.bin/astro dev status`), or start with a different `PORT`.
+- **Organization PRs are missing or show an SSO warning**: Authorize your Classic PAT for SAML SSO in GitHub settings, or scope/approve your Fine-grained PAT for that organization.
+- **`403` error on `Refresh`, `Sync`, `Draft`, `Labels`, or `Merge` behind a reverse proxy**: Ensure the proxy forwards `Host` / `X-Forwarded-Host` matching the browser's `Origin`. If you set `GHCC_ALLOWED_HOSTS`, include the public hostname and rebuild the Docker image (`docker compose up -d --build --wait`).
 
-## End-to-End Tests
+## License
 
-Install the Playwright Chromium browser once:
-
-```sh
-./node_modules/.bin/playwright install chromium
-```
-
-Run the browser tests against a production build with a mocked GitHub API:
-
-```sh
-npm run test:e2e
-```
-
-The tests build the app and start it on port `4330` with the boot check disabled. They intercept `/api/snapshot` with fixtures, so no GitHub credentials are required.
+MIT — see [LICENSE](LICENSE).

@@ -2,6 +2,8 @@
   "name": "ghcc",
   "version": "0.1.0",
   "private": true,
+  "description": "GitHub Command Center — local and self-hosted pull request dashboard",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "astro dev",
