@@ -91,6 +91,7 @@ import { computed, nextTick, onUnmounted, ref, useId } from 'vue';
 import CarbonIcon from '@/components/CarbonIcon.vue';
 import { IDLE_PR_MERGE_STATE, type PrMergeState } from '@/composables/use-dashboard-state';
 import type { MergeMethod, PrView } from '@/types/pr';
+import { isPrReadyToMerge } from '@/utils/ready-to-merge';
 
 interface Props {
   pr: PrView;
@@ -123,7 +124,7 @@ const isBusy = computed<boolean>(() => props.mergeState.status === 'merging');
 const isMerged = computed<boolean>(() => props.mergeState.status === 'merged');
 const hasConflicts = computed<boolean>(() => props.pr.merge.state === 'conflicting');
 const isBlocked = computed<boolean>(() => isBusy.value || isMerged.value || hasConflicts.value);
-const isReadyToMerge = computed<boolean>(() => props.pr.bucket === 'ready');
+const isReadyToMerge = computed<boolean>(() => isPrReadyToMerge(props.pr));
 
 const mainLabel = computed<string>(() => {
   if (isBusy.value) {

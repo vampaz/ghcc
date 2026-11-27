@@ -1725,4 +1725,95 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('shows a Ready to Merge rail section before Waiting on Others with authored and teammate ready PRs', async () => {
+    const base = makeSnapshot();
+    const teammateReady = makePrView({
+      key: 'acme/web-app#510',
+      repo: 'web-app',
+      repository: 'acme/web-app',
+      number: 510,
+      title: 'feat: teammate ready change',
+      author: 'leo',
+      sources: ['repo'],
+      bucket: 'waiting',
+      myAction: 'none',
+      blockers: [],
+      ci: { state: 'passing', passing: 4, failing: [], pending: 0, hiddenCount: 0 },
+      review: { decision: 'approved', approvals: ['ana'], changesRequested: [], pending: [] },
+      merge: { state: 'clean', source: 'fresh' },
+      blockerSummary: 'CI passing ✓ · Approved ✓',
+    });
+    const teammateBlocked = makePrView({
+      key: 'acme/web-app#511',
+      repo: 'web-app',
+      repository: 'acme/web-app',
+      number: 511,
+      title: 'fix: teammate pending review',
+      author: 'mia',
+      sources: ['repo'],
+      bucket: 'waiting',
+      myAction: 'none',
+      blockers: ['review-required'],
+      ci: { state: 'passing', passing: 4, failing: [], pending: 0, hiddenCount: 0 },
+      review: { decision: 'required', approvals: [], changesRequested: [], pending: ['ana'] },
+      merge: { state: 'blocked', source: 'fresh' },
+      blockerSummary: 'CI passing ✓ · blocked by review',
+    });
+
+    const snap: SnapshotResponse = {
+      ...base,
+      pullRequests: [...base.pullRequests, teammateReady, teammateBlocked],
+    };
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.startsWith('/api/pull/')) {
+        return new Response(JSON.stringify(makeDetail()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(snap), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"ready-rail-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Ready to Merge section appears before Waiting on Others inside .context-rail
+    const railSections = wrapper.findAll('.context-rail > section');
+    expect(railSections).toHaveLength(2);
+    expect(railSections[0]!.find('h2').text()).toBe('Ready to Merge');
+    expect(railSections[1]!.find('h2').text()).toBe('Waiting on Others');
+
+    // Includes both authored ready (#202) and teammate ready (#510), excludes failing (#101), waiting (#303), draft (#404), and teammate blocked (#511)
+    const readyItems = wrapper.findAll('.ready-item');
+    expect(readyItems).toHaveLength(2);
+    expect(readyItems.map((item) => item.text()).join(' | ')).toContain('#202');
+    expect(readyItems.map((item) => item.text()).join(' | ')).toContain('#510');
+    expect(readyItems.map((item) => item.text()).join(' | ')).not.toContain('#511');
+    expect(readyItems.map((item) => item.text()).join(' | ')).not.toContain('#303');
+
+    // Clicking a Ready to Merge item opens the inspector drawer and keeps it open
+    await readyItems[1]!.find('.ready-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.inspector-dialog').classes()).toContain('open');
+
+    // Clicking Squash inside Ready to Merge opens MergeConfirmDialog
+    await readyItems[0]!.find('button[aria-label="Squash — acme/web-app#202"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.merge-confirm-dialog').attributes('open')).toBeDefined();
+
+    // Switching to Mine tab scopes Ready to Merge to authored PRs only
+    const mineBtn = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Mine');
+    await mineBtn!.trigger('click');
+    expect(wrapper.findAll('.ready-item')).toHaveLength(1);
+    expect(wrapper.find('.ready-item').text()).toContain('#202');
+
+    wrapper.unmount();
+  });
 });

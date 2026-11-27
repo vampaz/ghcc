@@ -105,7 +105,45 @@
           </template>
         </ActionQueue>
 
-        <aside v-if="showWaitingRail" class="context-rail app-scroll" aria-label="Waiting queue">
+        <aside
+          v-if="showWaitingRail"
+          class="context-rail app-scroll"
+          aria-label="Ready and waiting queues"
+        >
+          <ReadyPanel
+            :pull-requests="readyPullRequests"
+            :selected-key="activeKey"
+            :now-ms="nowMs"
+            :merge-states="mergeStates"
+            @select="onSelectPr"
+            @request-merge="openMergeConfirm"
+          >
+            <template #inline-inspector="{ pr }">
+              <PrInspector
+                v-if="!isDesktop && inspector.key === pr.key"
+                mode="inline"
+                :pr="pr"
+                :inspector="inspector"
+                :now-ms="nowMs"
+                :resolved-theme="resolvedTheme"
+                :sync-state="syncStates[pr.key]"
+                :draft-state="draftStates[pr.key]"
+                :merge-state="mergeStates[pr.key]"
+                :repo-labels-state="repoLabelsStates[pr.repository]"
+                :label-state="labelStates[pr.key]"
+                @close="closeInspector"
+                @retry="openInspector"
+                @sync="syncPullRequest"
+                @toggle-draft="togglePullDraft"
+                @request-merge="openMergeConfirm"
+                @load-labels="onLoadLabels"
+                @retry-load-labels="onRetryLoadLabels"
+                @update-labels="updatePullLabels"
+                @open-mermaid="openMermaidFullscreen(pr, $event)"
+              />
+            </template>
+          </ReadyPanel>
+
           <WaitingPanel
             :pull-requests="waitingPullRequests"
             :selected-key="activeKey"
@@ -216,6 +254,7 @@ import KpiStrip from '@/components/KpiStrip.vue';
 import MergeConfirmDialog from '@/components/MergeConfirmDialog.vue';
 import MermaidFullscreenDialog from '@/components/MermaidFullscreenDialog.vue';
 import PrInspector from '@/components/PrInspector.vue';
+import ReadyPanel from '@/components/ReadyPanel.vue';
 import WaitingPanel from '@/components/WaitingPanel.vue';
 import WarningStrip from '@/components/WarningStrip.vue';
 import { useDashboardState } from '@/composables/use-dashboard-state';
@@ -227,6 +266,7 @@ import {
   useUrlState,
 } from '@/composables/use-url-state';
 import type { MergeMethod, PrView } from '@/types/pr';
+import { isPrReadyToMerge } from '@/utils/ready-to-merge';
 
 type MergeConfirmState =
   | { status: 'closed' }
@@ -379,6 +419,10 @@ const primaryQueuePulls = computed<PrView[]>(() => {
   return scopedPulls.value;
 });
 
+const readyPullRequests = computed<PrView[]>(() =>
+  filteredBasePulls.value.filter(isPrReadyToMerge),
+);
+
 const waitingPullRequests = computed<PrView[]>(() =>
   filteredBasePulls.value.filter(
     (pr) => pr.bucket === 'waiting' && pr.sources.includes('authored'),
@@ -445,7 +489,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 const PROTECTED_INSPECTOR_SELECTOR =
-  '.inspector-dialog, .pr-card, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .refresh-btn';
+  '.inspector-dialog, .pr-card, .ready-item, .waiting-item, .merge-confirm-dialog, .mermaid-fullscreen-dialog, .merge-menu-popover, .label-picker-popover, .refresh-btn';
 let lastPointerDownProtected = false;
 
 function isProtectedInspectorTarget(target: EventTarget | null): boolean {
