@@ -2712,4 +2712,112 @@ describe('DashboardApp', () => {
 
     wrapper.unmount();
   });
+
+  it('groups related cross-repo PRs by mission, links siblings in inspector, and warns on merge order', async () => {
+    const baseSnap = makeSnapshot();
+    const prFe = {
+      ...baseSnap.pullRequests[0]!,
+      key: 'acme/frontend#101',
+      repo: 'frontend',
+      repository: 'acme/frontend',
+      title: 'fix: sso ui [SEC-16]',
+      bucket: 'ready' as const,
+      mission: {
+        id: 'ticket:SEC-16',
+        label: 'SEC-16',
+        ticketKeys: ['SEC-16'],
+        peerCount: 1,
+        mergeOrder: 1,
+        mergeTotal: 2,
+      },
+    };
+    const prBe = {
+      ...baseSnap.pullRequests[1]!,
+      key: 'acme/backend#202',
+      repo: 'backend',
+      repository: 'acme/backend',
+      title: 'fix: sso api [SEC-16]',
+      mission: {
+        id: 'ticket:SEC-16',
+        label: 'SEC-16',
+        ticketKeys: ['SEC-16'],
+        peerCount: 1,
+        blockedByKeys: ['acme/frontend#101'],
+        mergeOrder: 2,
+        mergeTotal: 2,
+      },
+    };
+    const snap = makeSnapshot({
+      pullRequests: [prFe, prBe, baseSnap.pullRequests[2]!],
+      missions: [
+        {
+          id: 'ticket:SEC-16',
+          label: 'SEC-16',
+          ticketKeys: ['SEC-16'],
+          prKeys: ['acme/frontend#101', 'acme/backend#202'],
+          repositories: ['acme/backend', 'acme/frontend'],
+          readyCount: 1,
+          totalCount: 2,
+          hasStack: false,
+          hasCrossRepo: true,
+          dependencyNotes: ['#202 waits on #101 (Depends on FE)'],
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/presets') {
+        return new Response(JSON.stringify({ presets: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/pull/')) {
+        return new Response(JSON.stringify(makeDetail()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(snap), {
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"mission-1"' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const wrapper = mountWithDeps(DashboardApp, { attachTo: document.body });
+    await flushPromises();
+
+    // Toggle Missions grouping
+    const missionBtn = wrapper.find('.mission-toggle-btn');
+    expect(missionBtn.exists()).toBe(true);
+    expect(missionBtn.text()).toContain('Missions');
+    await missionBtn.trigger('click');
+    await flushPromises();
+
+    const missionGroup = wrapper.find('.mission-group-card');
+    expect(missionGroup.exists()).toBe(true);
+    expect(missionGroup.text()).toContain('SEC-16');
+    expect(missionGroup.text()).toContain('cross-repo');
+    expect(missionGroup.text()).toContain('#202 waits on #101');
+
+    // Clicking #202 opens inspector with Mission siblings list
+    const beCard = missionGroup.findAll('.pr-card')[1]!;
+    await beCard.find('.pr-card-trigger').trigger('click');
+    await flushPromises();
+
+    const inspector = wrapper.find('.inspector-dialog');
+    expect(inspector.find('.mission-detail-section').exists()).toBe(true);
+    expect(inspector.findAll('.mission-sibling-btn')).toHaveLength(2);
+
+    // Opening MergeConfirmDialog on #202 warns that #101 is still open
+    await beCard.find('.merge-main-btn').trigger('click');
+    await flushPromises();
+    const mergeDialog = wrapper.find('.merge-confirm-dialog');
+    expect(mergeDialog.text()).toContain('Dependency order notice');
+    expect(mergeDialog.text()).toContain('acme/frontend#101');
+
+    wrapper.unmount();
+  });
 });

@@ -7,6 +7,7 @@ import {
   updateFlakeTracker,
   type PrCheckSnapshot,
 } from '@/server/derive/flakes';
+import { deriveMissions } from '@/server/derive/missions';
 import {
   computeCounts,
   isActivePullRequest,
@@ -223,11 +224,13 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
               .getFlakeTracker()
               .catch(() => ({ observations: {}, stats: {} }));
             const flaked = annotateFlakyPullRequests(triaged.pullRequests, flakeState, currentMs);
+            const missioned = deriveMissions(flaked.pullRequests);
             const hydratedSnapshot: SnapshotResponse = {
               ...persisted.snapshot,
-              pullRequests: flaked.pullRequests,
-              ciOutages: deriveCiOutages(flaked.pullRequests),
+              pullRequests: missioned.pullRequests,
+              ciOutages: deriveCiOutages(missioned.pullRequests),
               flakyChecks: flaked.flakyChecks,
+              missions: missioned.missions,
             };
             cachedResult = {
               snapshot: hydratedSnapshot,
@@ -607,15 +610,17 @@ export function createSnapshotService(deps: SnapshotServiceDeps): SnapshotServic
         flakeUpdate.nextState,
         completedMs,
       );
+      const missioned = deriveMissions(flaked.pullRequests);
 
       const snapshot: SnapshotResponse = {
         fetchedAt: new Date(completedMs).toISOString(),
         viewer: { login: lastLogin },
         state: lifecycle === 'degraded' ? 'degraded' : 'ready',
-        counts: computeCounts(flaked.pullRequests),
-        pullRequests: flaked.pullRequests,
-        ciOutages: deriveCiOutages(flaked.pullRequests),
+        counts: computeCounts(missioned.pullRequests),
+        pullRequests: missioned.pullRequests,
+        ciOutages: deriveCiOutages(missioned.pullRequests),
         flakyChecks: flaked.flakyChecks,
+        missions: missioned.missions,
         rateLimit: {
           graphql: lastGraphqlLimit,
           core: lastCoreLimit,

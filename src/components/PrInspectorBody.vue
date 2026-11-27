@@ -134,6 +134,51 @@
       </div>
     </div>
 
+    <section
+      v-if="pr?.mission && missionSiblings.length > 1"
+      class="detail-section mission-detail-section"
+      aria-label="Mission and related pull requests"
+    >
+      <div class="detail-heading-row">
+        <h2 class="detail-heading">
+          Mission · {{ pr.mission.label }}
+          <span class="mono-num detail-count">
+            {{ pr.mission.mergeOrder ?? 1 }}/{{ pr.mission.mergeTotal ?? missionSiblings.length }}
+          </span>
+        </h2>
+      </div>
+      <ul role="list" class="mission-sibling-list">
+        <li
+          v-for="sibling in missionSiblings"
+          :key="sibling.key"
+          class="mission-sibling-row"
+          :class="{ current: sibling.key === pr.key }"
+        >
+          <button
+            type="button"
+            class="mission-sibling-btn"
+            :aria-current="sibling.key === pr.key ? 'true' : undefined"
+            @click="$emit('select-pr', sibling)"
+          >
+            <span class="mission-step mono-num">{{ sibling.mission?.mergeOrder ?? '·' }}</span>
+            <span class="mission-sibling-copy">
+              <span class="mission-sibling-key mono-num">{{ sibling.key }}</span>
+              <span class="mission-sibling-title">{{ sibling.title }}</span>
+            </span>
+            <span class="mission-sibling-status" :data-bucket="sibling.bucket">
+              {{
+                sibling.bucket === 'ready'
+                  ? 'ready'
+                  : sibling.ci.state === 'failing'
+                    ? 'CI fail'
+                    : sibling.bucket
+              }}
+            </span>
+          </button>
+        </li>
+      </ul>
+    </section>
+
     <div v-if="inspector.status === 'loading'" class="state-box">
       Loading checks, reviewers, and timeline...
     </div>
@@ -813,6 +858,7 @@ interface Props {
   repoReviewersState?: RepoReviewersState;
   prReviewersState?: PrReviewersState;
   flakyChecks?: FlakyCheckSummary[];
+  missionSiblings?: PrView[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -831,6 +877,7 @@ const props = withDefaults(defineProps<Props>(), {
   repoReviewersState: () => IDLE_REPO_REVIEWERS_STATE,
   prReviewersState: () => IDLE_PR_REVIEWERS_STATE,
   flakyChecks: () => [],
+  missionSiblings: () => [],
 });
 
 const emit = defineEmits<{
@@ -865,6 +912,7 @@ const emit = defineEmits<{
     },
   ];
   'open-mermaid': [source: string];
+  'select-pr': [pr: PrView];
 }>();
 
 const showSyncAction = computed<boolean>(
@@ -2278,5 +2326,89 @@ async function copyLogExcerpt(checkRunId: number, text: string): Promise<void> {
   font-size: 0.68rem;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.mission-sibling-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.mission-sibling-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-muted);
+  color: var(--ink-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mission-sibling-btn:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-surface-hover);
+}
+
+.mission-sibling-row.current .mission-sibling-btn {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+}
+
+.mission-step {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.3rem;
+  block-size: 1.3rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--ink-secondary);
+}
+
+.mission-sibling-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+}
+
+.mission-sibling-key {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.mission-sibling-title {
+  font-size: 0.78rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-sibling-status {
+  flex: 0 0 auto;
+  padding: 0.08rem 0.38rem;
+  border-radius: 0.3rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+}
+
+.mission-sibling-status[data-bucket='ready'] {
+  background-color: var(--accent-emerald-bg);
+  color: var(--accent-emerald);
 }
 </style>

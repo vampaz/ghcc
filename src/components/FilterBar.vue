@@ -80,6 +80,19 @@
     />
 
     <button
+      v-if="missionCount > 0 || groupByMission"
+      type="button"
+      class="mission-toggle-btn"
+      :class="{ active: groupByMission }"
+      :aria-pressed="groupByMission ? 'true' : 'false'"
+      @click="$emit('update:groupByMission', !groupByMission)"
+    >
+      <CarbonIcon name="branch" :size="13" />
+      <span>Missions</span>
+      <span class="mission-count mono-num">({{ missionCount }})</span>
+    </button>
+
+    <button
       v-if="bucket"
       type="button"
       class="filter-chip bucket-chip"
@@ -126,6 +139,8 @@ interface Props {
   snoozed?: boolean;
   snoozedCount?: number;
   staleOnly?: boolean;
+  groupByMission?: boolean;
+  missionCount?: number;
   savedPresets?: SavedFilterPreset[];
   presetsSaving?: boolean;
   presetsError?: string | null;
@@ -135,6 +150,8 @@ const props = withDefaults(defineProps<Props>(), {
   snoozed: false,
   snoozedCount: 0,
   staleOnly: false,
+  groupByMission: false,
+  missionCount: 0,
   savedPresets: () => [],
   presetsSaving: false,
   presetsError: null,
@@ -149,6 +166,7 @@ const emit = defineEmits<{
   'update:drafts': [value: boolean];
   'update:snoozed': [value: boolean];
   'update:staleOnly': [value: boolean];
+  'update:groupByMission': [value: boolean];
   'apply-preset': [filters: SavedFilterPreset['filters']];
   'save-preset': [name: string];
   'delete-preset': [id: string];
@@ -190,7 +208,8 @@ const hasActiveFilters = computed<boolean>(() => {
     props.repoSelection.mode !== 'all' ||
     props.drafts ||
     props.snoozed ||
-    props.staleOnly
+    props.staleOnly ||
+    props.groupByMission
   );
 });
 
@@ -445,6 +464,39 @@ defineExpose({ focusSearch });
 
 .clear-btn {
   color: var(--ink-secondary);
+}
+
+.mission-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  min-block-size: 2rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-surface);
+  color: var(--ink-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mission-toggle-btn:hover {
+  background-color: var(--bg-surface-hover);
+  color: var(--ink-primary);
+}
+
+.mission-toggle-btn.active {
+  border-color: var(--accent-blue);
+  background-color: var(--accent-blue-bg);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.mission-count {
+  font-size: 0.72rem;
+  opacity: 0.85;
 }
 
 @media (max-width: 639px), (pointer: coarse) {

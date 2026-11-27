@@ -52,6 +52,12 @@
               >
                 flaky CI
               </span>
+              <span v-if="pr.mission" class="tag mono-num" data-tone="blue" :title="missionTooltip">
+                {{ pr.mission.label }}
+                <template v-if="pr.mission.mergeOrder && pr.mission.mergeTotal">
+                  · {{ pr.mission.mergeOrder }}/{{ pr.mission.mergeTotal }}
+                </template>
+              </span>
               <span
                 v-if="(pr.unresolvedThreadCount ?? 0) > 0"
                 class="tag mono-num"
@@ -354,7 +360,7 @@ function onCardBodyClick(event: MouseEvent): void {
   if (
     !target ||
     target.closest(
-      'button, a, input, label, select, textarea, [role="menu"], [role="menuitem"], [popover], .pr-select-wrap, .draft-toggle, .merge-control',
+      'button, a, input, label, select, textarea, [role="menu"], [role="menuitem"], [popover], .pr-select-wrap, .draft-toggle, .merge-split',
     )
   ) {
     return;
@@ -371,6 +377,24 @@ const isSnoozed = computed<boolean>(() => isPrSnoozed(props.pr));
 const snoozeBadgeText = computed<string>(() =>
   formatSnoozeBadge(props.pr.triage?.snoozeCondition, props.nowMs),
 );
+
+const missionTooltip = computed<string>(() => {
+  const m = props.pr.mission;
+  if (!m) {
+    return '';
+  }
+  const parts: string[] = [`Mission ${m.label} (${m.peerCount + 1} related PRs)`];
+  if (m.mergeOrder && m.mergeTotal) {
+    parts.push(`suggested merge step ${m.mergeOrder} of ${m.mergeTotal}`);
+  }
+  if (m.stackParentKey) {
+    parts.push(`stacked on ${m.stackParentKey}`);
+  }
+  if (m.blockedByKeys && m.blockedByKeys.length > 0) {
+    parts.push(`depends on ${m.blockedByKeys.join(', ')}`);
+  }
+  return parts.join(' · ');
+});
 
 function onPinClick(): void {
   if (props.triageState.status === 'saving') {

@@ -23,6 +23,16 @@
         <span>{{ bypassNotice }}</span>
       </p>
 
+      <div v-if="dependencyWarnings.length > 0" class="merge-dialog-warning" role="note">
+        <CarbonIcon name="branch" :size="16" class="merge-warning-icon" />
+        <div class="merge-warning-list">
+          <strong>Dependency order notice:</strong>
+          <ul role="list" class="merge-warning-items">
+            <li v-for="note in dependencyWarnings" :key="note">{{ note }}</li>
+          </ul>
+        </div>
+      </div>
+
       <fieldset class="merge-method-group">
         <legend class="merge-method-legend">Merge method</legend>
         <label class="merge-method-option" :class="{ selected: chosenMethod === 'squash' }">
@@ -103,10 +113,12 @@ interface Props {
   pr: PrView | null;
   initialMethod: MergeMethod;
   mergeState?: PrMergeState;
+  dependencyWarnings?: string[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
   mergeState: () => IDLE_PR_MERGE_STATE,
+  dependencyWarnings: () => [],
 });
 
 const emit = defineEmits<{
@@ -303,6 +315,20 @@ function onConfirm(): void {
 
 .merge-warning-icon {
   margin-top: 0.1rem;
+}
+
+.merge-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.merge-warning-items {
+  margin: 0;
+  padding-left: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
 }
 
 .merge-method-group {

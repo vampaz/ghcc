@@ -143,3 +143,109 @@ test('badges known flaky CI checks on PR cards and inside the inspector', async 
   await expect(inspector).toBeVisible();
   await expect(inspector).toContainText('flaky · 4×');
 });
+
+test('groups cross-repo mission PRs, navigates mission siblings in inspector, and warns before out-of-order merge', async ({
+  page,
+}) => {
+  const base = makeSnapshot();
+  const prFe = {
+    ...base.pullRequests[0]!,
+    key: 'acme/frontend#101',
+    repo: 'frontend',
+    repository: 'acme/frontend',
+    title: 'fix: browser SSO codes [SEC-16]',
+    bucket: 'ready' as const,
+    mission: {
+      id: 'ticket:SEC-16',
+      label: 'SEC-16',
+      ticketKeys: ['SEC-16'],
+      peerCount: 1,
+      mergeOrder: 1,
+      mergeTotal: 2,
+    },
+  };
+  const prBe = {
+    ...base.pullRequests[1]!,
+    key: 'acme/backend#202',
+    repo: 'backend',
+    repository: 'acme/backend',
+    title: 'fix: exchange SSO JWTs [SEC-16]',
+    mission: {
+      id: 'ticket:SEC-16',
+      label: 'SEC-16',
+      ticketKeys: ['SEC-16'],
+      peerCount: 1,
+      blockedByKeys: ['acme/frontend#101'],
+      mergeOrder: 2,
+      mergeTotal: 2,
+    },
+  };
+  const snapshot = makeSnapshot({
+    pullRequests: [prFe, prBe, base.pullRequests[2]!],
+    missions: [
+      {
+        id: 'ticket:SEC-16',
+        label: 'SEC-16',
+        ticketKeys: ['SEC-16'],
+        prKeys: ['acme/frontend#101', 'acme/backend#202'],
+        repositories: ['acme/backend', 'acme/frontend'],
+        readyCount: 1,
+        totalCount: 2,
+        hasStack: false,
+        hasCrossRepo: true,
+        dependencyNotes: ['#202 waits on #101 (Depends on FE)'],
+      },
+    ],
+  });
+
+  await page.route('**/api/presets', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ presets: [] }),
+    });
+  });
+
+  await page.route('**/api/pull/*/*/*', async (route) => {
+    const { pathname } = new URL(route.request().url());
+    const pr = pathname.includes('202') ? prBe : prFe;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(makePrDetail(pr)),
+    });
+  });
+
+  await page.route('**/api/snapshot', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { etag: '"e2e-missions"' },
+      body: JSON.stringify(snapshot),
+    });
+  });
+
+  await page.goto('/');
+
+  await page.getByRole('button', { name: /Missions/i }).click();
+  const missionCard = page.locator('.mission-group-card');
+  await expect(missionCard).toBeVisible();
+  await expect(missionCard).toContainText('SEC-16');
+  await expect(missionCard).toContainText('cross-repo');
+  await expect(missionCard).toContainText('#202 waits on #101');
+
+  // Inspect #202 and jump to sibling #101 from the Mission panel
+  const beCard = missionCard.locator('.pr-card').nth(1);
+  await beCard.locator('.pr-card-trigger').click();
+  const inspector = page.locator('.inspector-dialog.open');
+  await expect(inspector).toContainText('Mission · SEC-16');
+  await inspector.locator('.mission-sibling-btn').first().click();
+  await expect(inspector).toContainText('acme/frontend#101');
+
+  // Opening merge confirmation on #202 shows dependency order warning
+  await beCard.getByRole('button', { name: /Squash — acme\/backend#202/i }).click();
+  const mergeDialog = page.locator('.merge-confirm-dialog');
+  await expect(mergeDialog).toBeVisible();
+  await expect(mergeDialog).toContainText('Dependency order notice');
+  await expect(mergeDialog).toContainText('acme/frontend#101');
+});

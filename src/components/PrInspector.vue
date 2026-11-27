@@ -52,6 +52,7 @@
         :repo-reviewers-state="repoReviewersState"
         :pr-reviewers-state="prReviewersState"
         :flaky-checks="flakyChecks"
+        :mission-siblings="missionSiblings"
         @retry="$emit('retry', $event)"
         @sync="$emit('sync', $event)"
         @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
@@ -75,6 +76,7 @@
         @retry-load-labels="$emit('retry-load-labels', $event)"
         @update-labels="(target, labels) => $emit('update-labels', target, labels)"
         @open-mermaid="$emit('open-mermaid', $event)"
+        @select-pr="$emit('select-pr', $event)"
       />
     </div>
   </aside>
@@ -113,6 +115,7 @@
       :repo-reviewers-state="repoReviewersState"
       :pr-reviewers-state="prReviewersState"
       :flaky-checks="flakyChecks"
+      :mission-siblings="missionSiblings"
       @retry="$emit('retry', $event)"
       @sync="$emit('sync', $event)"
       @rerun-checks="(target, options) => $emit('rerun-checks', target, options)"
@@ -136,6 +139,7 @@
       @retry-load-labels="$emit('retry-load-labels', $event)"
       @update-labels="(target, labels) => $emit('update-labels', target, labels)"
       @open-mermaid="$emit('open-mermaid', $event)"
+      @select-pr="$emit('select-pr', $event)"
     />
   </section>
 </template>
@@ -198,6 +202,7 @@ interface Props {
   repoReviewersState?: RepoReviewersState;
   prReviewersState?: PrReviewersState;
   flakyChecks?: FlakyCheckSummary[];
+  missionSiblings?: PrView[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -216,6 +221,7 @@ const props = withDefaults(defineProps<Props>(), {
   repoReviewersState: () => IDLE_REPO_REVIEWERS_STATE,
   prReviewersState: () => IDLE_PR_REVIEWERS_STATE,
   flakyChecks: () => [],
+  missionSiblings: () => [],
 });
 
 defineEmits<{
@@ -251,6 +257,7 @@ defineEmits<{
     },
   ];
   'open-mermaid': [source: string];
+  'select-pr': [pr: PrView];
 }>();
 
 const lastOpenPr = ref<PrView | null>(props.pr);

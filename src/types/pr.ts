@@ -108,6 +108,32 @@ export interface PrView {
   blockerSummary: string;
   unresolvedThreadCount?: number;
   triage?: PrTriageInfo;
+  mission?: PrMissionInfo;
+}
+
+export interface PrMissionInfo {
+  id: string;
+  label: string;
+  ticketKeys: string[];
+  peerCount: number;
+  stackParentKey?: string;
+  stackChildKeys?: string[];
+  blockedByKeys?: string[];
+  mergeOrder?: number;
+  mergeTotal?: number;
+}
+
+export interface SnapshotMission {
+  id: string;
+  label: string;
+  ticketKeys: string[];
+  prKeys: string[];
+  repositories: string[];
+  readyCount: number;
+  totalCount: number;
+  hasStack: boolean;
+  hasCrossRepo: boolean;
+  dependencyNotes: string[];
 }
 
 export interface RateLimitBucket {
@@ -170,6 +196,7 @@ export interface SnapshotResponse {
   pullRequests: PrView[];
   ciOutages?: CiOutageAlert[];
   flakyChecks?: FlakyCheckSummary[];
+  missions?: SnapshotMission[];
   rateLimit: {
     graphql: RateLimitBucket | null;
     core: RateLimitBucket | null;
@@ -377,6 +404,7 @@ export interface SavedFilterPreset {
     drafts: boolean;
     snoozed: boolean;
     staleOnly: boolean;
+    groupByMission?: boolean;
   };
   createdAt: string;
 }

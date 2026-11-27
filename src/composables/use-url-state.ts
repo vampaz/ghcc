@@ -20,6 +20,7 @@ export interface DashboardFilters {
   drafts: boolean;
   snoozed: boolean;
   staleOnly: boolean;
+  groupByMission?: boolean;
 }
 
 const VALID_VIEWS = new Set<ViewFilter>(['all', 'mine', 'review', 'team']);
@@ -116,6 +117,7 @@ export function parseFiltersFromSearch(search: string): DashboardFilters {
     drafts: params.get('drafts') === '1',
     snoozed: params.get('snoozed') === '1',
     staleOnly: params.get('stale') === '1',
+    groupByMission: params.get('group') === 'missions',
   };
 }
 
@@ -144,6 +146,9 @@ export function serializeFiltersToSearch(filters: DashboardFilters): string {
   if (filters.staleOnly) {
     params.set('stale', '1');
   }
+  if (filters.groupByMission) {
+    params.set('group', 'missions');
+  }
   const str = params.toString();
   return str ? `?${str}` : '';
 }
@@ -156,6 +161,7 @@ export function useUrlState() {
   const drafts = ref<boolean>(false);
   const snoozed = ref<boolean>(false);
   const staleOnly = ref<boolean>(false);
+  const groupByMission = ref<boolean>(false);
   const hydrated = ref<boolean>(false);
 
   function applyFilters(next: DashboardFilters): void {
@@ -166,6 +172,7 @@ export function useUrlState() {
     drafts.value = next.drafts;
     snoozed.value = next.snoozed;
     staleOnly.value = next.staleOnly;
+    groupByMission.value = Boolean(next.groupByMission);
   }
 
   function applyFromLocation(): void {
@@ -183,9 +190,10 @@ export function useUrlState() {
     drafts.value = false;
     snoozed.value = false;
     staleOnly.value = false;
+    groupByMission.value = false;
   }
 
-  watch([view, bucket, q, repoSelection, drafts, snoozed, staleOnly], () => {
+  watch([view, bucket, q, repoSelection, drafts, snoozed, staleOnly, groupByMission], () => {
     if (typeof window === 'undefined' || !hydrated.value) {
       return;
     }
@@ -197,6 +205,7 @@ export function useUrlState() {
       drafts: drafts.value,
       snoozed: snoozed.value,
       staleOnly: staleOnly.value,
+      groupByMission: groupByMission.value,
     });
     const nextUrl = `${window.location.pathname}${nextSearch}${window.location.hash}`;
     if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) {
@@ -224,6 +233,7 @@ export function useUrlState() {
     drafts,
     snoozed,
     staleOnly,
+    groupByMission,
     applyFilters,
     resetFilters,
   };

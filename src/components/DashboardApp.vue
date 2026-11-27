@@ -60,6 +60,8 @@
           :snoozed="snoozed"
           :snoozed-count="snoozedPullRequests.length"
           :stale-only="staleOnly"
+          :group-by-mission="groupByMission"
+          :mission-count="missions.length"
           :saved-presets="savedPresets"
           :presets-saving="presetsSaving"
           :presets-error="presetsError"
@@ -71,6 +73,7 @@
           @update:drafts="drafts = $event"
           @update:snoozed="snoozed = $event"
           @update:stale-only="staleOnly = $event"
+          @update:group-by-mission="groupByMission = $event"
           @apply-preset="onApplyPreset"
           @save-preset="onSavePreset"
           @delete-preset="onDeletePreset"
@@ -92,6 +95,8 @@
           :snoozed-count="snoozedPullRequests.length"
           :ready-count="readyPullRequests.length"
           :waiting-count="waitingPullRequests.length"
+          :group-by-mission="groupByMission"
+          :missions="missions"
           :sync-states="syncStates"
           :draft-states="draftStates"
           :merge-states="mergeStates"
@@ -137,6 +142,7 @@
               :repo-reviewers-state="repoReviewersStates[pr.repository]"
               :pr-reviewers-state="prReviewersStates[pr.key]"
               :flaky-checks="flakyChecks"
+              :mission-siblings="missionSiblingsFor(pr)"
               @close="closeInspector"
               @retry="openInspector"
               @sync="syncPullRequest"
@@ -157,6 +163,7 @@
               @retry-load-labels="onRetryLoadLabels"
               @update-labels="updatePullLabels"
               @open-mermaid="openMermaidFullscreen(pr, $event)"
+              @select-pr="onSelectPr"
             />
           </template>
         </ActionQueue>
@@ -196,6 +203,7 @@
                 :repo-reviewers-state="repoReviewersStates[pr.repository]"
                 :pr-reviewers-state="prReviewersStates[pr.key]"
                 :flaky-checks="flakyChecks"
+                :mission-siblings="missionSiblingsFor(pr)"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
@@ -216,6 +224,7 @@
                 @retry-load-labels="onRetryLoadLabels"
                 @update-labels="updatePullLabels"
                 @open-mermaid="openMermaidFullscreen(pr, $event)"
+                @select-pr="onSelectPr"
               />
             </template>
           </ReadyPanel>
@@ -252,6 +261,7 @@
                 :repo-reviewers-state="repoReviewersStates[pr.repository]"
                 :pr-reviewers-state="prReviewersStates[pr.key]"
                 :flaky-checks="flakyChecks"
+                :mission-siblings="missionSiblingsFor(pr)"
                 @close="closeInspector"
                 @retry="openInspector"
                 @sync="syncPullRequest"
@@ -272,6 +282,7 @@
                 @retry-load-labels="onRetryLoadLabels"
                 @update-labels="updatePullLabels"
                 @open-mermaid="openMermaidFullscreen(pr, $event)"
+                @select-pr="onSelectPr"
               />
             </template>
           </WaitingPanel>
@@ -335,6 +346,7 @@
       :repo-reviewers-state="selectedPr ? repoReviewersStates[selectedPr.repository] : undefined"
       :pr-reviewers-state="selectedPr ? prReviewersStates[selectedPr.key] : undefined"
       :flaky-checks="flakyChecks"
+      :mission-siblings="missionSiblingsFor(selectedPr)"
       @close="closeInspector"
       @retry="openInspector"
       @sync="syncPullRequest"
@@ -355,6 +367,7 @@
       @retry-load-labels="onRetryLoadLabels"
       @update-labels="updatePullLabels"
       @open-mermaid="openMermaidFullscreen(selectedPr, $event)"
+      @select-pr="onSelectPr"
     />
 
     <MergeConfirmDialog
@@ -362,6 +375,9 @@
       :pr="mergeConfirm.status === 'open' ? mergeConfirm.pr : null"
       :initial-method="mergeConfirm.status === 'open' ? mergeConfirm.mergeMethod : 'squash'"
       :merge-state="mergeConfirm.status === 'open' ? mergeStates[mergeConfirm.pr.key] : undefined"
+      :dependency-warnings="
+        mergeConfirm.status === 'open' ? mergeDependencyWarningsFor(mergeConfirm.pr) : []
+      "
       @close="closeMergeConfirm"
       @confirm="onConfirmMerge"
     />
@@ -411,6 +427,7 @@ import type {
   MergeMethod,
   PrView,
   SavedFilterPreset,
+  SnapshotMission,
   SnoozeCondition,
 } from '@/types/pr';
 import { IDLE_BULK_ACTION_STATE, runBulkAction, type BulkActionState } from '@/utils/bulk-runner';
@@ -535,8 +552,18 @@ async function onConfirmMerge(pr: PrView, mergeMethod: MergeMethod): Promise<voi
 }
 
 const { resolvedTheme, toggleTheme } = useTheme();
-const { view, bucket, q, repoSelection, drafts, snoozed, staleOnly, applyFilters, resetFilters } =
-  useUrlState();
+const {
+  view,
+  bucket,
+  q,
+  repoSelection,
+  drafts,
+  snoozed,
+  staleOnly,
+  groupByMission,
+  applyFilters,
+  resetFilters,
+} = useUrlState();
 
 const paletteOpen = ref<boolean>(false);
 const checkedKeys = ref<Set<string>>(new Set());
@@ -580,6 +607,45 @@ const isDesktop = ref<boolean>(true);
 const allPullRequests = computed<PrView[]>(() => snapshot.value?.pullRequests ?? []);
 const ciOutages = computed<CiOutageAlert[]>(() => snapshot.value?.ciOutages ?? []);
 const flakyChecks = computed<FlakyCheckSummary[]>(() => snapshot.value?.flakyChecks ?? []);
+const missions = computed<SnapshotMission[]>(() => snapshot.value?.missions ?? []);
+
+function missionSiblingsFor(pr: PrView | null): PrView[] {
+  if (!pr?.mission) {
+    return [];
+  }
+  const mission = missions.value.find((m) => m.id === pr.mission?.id);
+  if (!mission) {
+    return [];
+  }
+  const byKey = new Map(allPullRequests.value.map((p) => [p.key, p]));
+  return mission.prKeys.map((key) => byKey.get(key)).filter((p): p is PrView => Boolean(p));
+}
+
+function mergeDependencyWarningsFor(pr: PrView | null): string[] {
+  if (!pr?.mission) {
+    return [];
+  }
+  const byKey = new Map(allPullRequests.value.map((p) => [p.key, p]));
+  const warnings: string[] = [];
+  if (pr.mission.stackParentKey) {
+    const parent = byKey.get(pr.mission.stackParentKey);
+    if (parent) {
+      warnings.push(
+        `Stacked on ${parent.key} (${parent.headRefName}), which is still open. Merge the base PR first.`,
+      );
+    }
+  }
+  for (const depKey of pr.mission.blockedByKeys ?? []) {
+    if (depKey === pr.mission.stackParentKey) {
+      continue;
+    }
+    const dep = byKey.get(depKey);
+    if (dep) {
+      warnings.push(`Marked dependent on ${dep.key} ("${dep.title}"), which is still open.`);
+    }
+  }
+  return warnings;
+}
 const dismissedOutageSignatures = ref<Set<string>>(new Set());
 
 const sharedCiByKey = computed<Record<string, string[]>>(() => {
@@ -930,7 +996,8 @@ const hasActiveFilters = computed<boolean>(() => {
     repoSelection.value.mode !== 'all' ||
     drafts.value ||
     snoozed.value ||
-    staleOnly.value
+    staleOnly.value ||
+    groupByMission.value
   );
 });
 
@@ -1122,6 +1189,14 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       title: snoozed.value ? 'Hide snoozed PRs' : 'Show snoozed PRs',
       run: () => {
         snoozed.value = !snoozed.value;
+      },
+    },
+    {
+      id: 'app:missions',
+      category: 'App',
+      title: groupByMission.value ? 'Ungroup missions (flat queue)' : 'Group queue by mission',
+      run: () => {
+        groupByMission.value = !groupByMission.value;
       },
     },
     {
